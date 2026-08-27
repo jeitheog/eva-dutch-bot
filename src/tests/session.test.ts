@@ -6,7 +6,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { advance, currentCard, newReviewSession, setSession, getSession, sessions } from '../services/session'
-import { formatReviewSummary, formatReviewCard } from '../services/intents'
+import {
+  formatReviewSummary,
+  formatReviewCardBack,
+  formatReviewCardExplain,
+  formatReviewCardFront,
+  reviewBackKeyboard,
+  reviewFrontKeyboard,
+} from '../services/intents'
 import { todayKey } from '../services/reminder'
 import type { CardDto } from '../services/dutch'
 
@@ -31,15 +38,37 @@ test('sesión de repaso: muestra una a una y termina con resumen', () => {
   assert.ok(summary.includes('1 bien'))
 })
 
-test('formato de tarjeta en repaso incluye front y pronunciación', () => {
+test('formato de tarjeta en repaso: front solo → back → explicación (Anki por pasos)', () => {
   const card = makeCard(1, 'Geef me de halter even', 'Dame la mancuerna un momento')
-  const text = formatReviewCard({ ...card, pronunciation: 'jeef me de jálter éven' })
-  assert.ok(text.includes('Geef me de halter even'))
-  assert.ok(text.includes('jeef me de jálter éven'))
+  const front = formatReviewCardFront(card)
+  assert.equal(front, '🎴 Geef me de halter even')
+  assert.ok(!front.includes('Dame la mancuerna'), 'el front NO muestra la traducción')
+
+  const back = formatReviewCardBack({ ...card, pronunciation: 'jeef me de jálter éven' })
+  assert.ok(back.includes('Geef me de halter even'))
+  assert.ok(back.includes('Dame la mancuerna un momento'))
+  assert.ok(back.includes('jeef me de jálter éven'))
+  assert.ok(!back.includes('📖'), 'el back NO adelanta la explicación')
+
+  const explain = formatReviewCardExplain({
+    ...card,
+    explanation: 'geef me = dame; halter = mancuerna; even suaviza la petición',
+    examples: JSON.stringify(['Geef me even de handdoek — Pásame la toalla un segundo']),
+  })
+  assert.ok(explain.includes('📖 geef me = dame'))
+  assert.ok(explain.includes('Pásame la toalla un segundo'))
+})
+
+test('teclados del repaso: front (ver traducción) y back (explicación + grades)', () => {
+  const frontKb = reviewFrontKeyboard()
+  assert.deepEqual(frontKb.inline_keyboard.flat().map((b) => b.callback_data), ['ver-traduccion'])
+  const backKb = reviewBackKeyboard()
+  const data = backKb.inline_keyboard.flat().map((b) => b.callback_data)
+  assert.deepEqual(data, ['explicacion', 'grade0', 'grade1', 'grade3', 'grade4', 'grade5'])
 })
 
 test('sessions por chat: set/get independientes', () => {
-  setSession(111, { mode: 'review', queue: [], idx: 0, correct: 0, wrong: 0, cardShownAt: 0 })
+  setSession(111, { mode: 'review', queue: [], idx: 0, correct: 0, wrong: 0, cardShownAt: 0, revealed: false, messageId: null })
   setSession(222, { mode: 'interview', step: 'nombre' })
   assert.equal(getSession(111)?.mode, 'review')
   assert.equal(getSession(222)?.mode, 'interview')

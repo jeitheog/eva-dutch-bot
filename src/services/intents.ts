@@ -117,16 +117,62 @@ export function reviewKeyboard(): { inline_keyboard: InlineKeyboardButton[][] } 
   }
 }
 
-/** Texto de la tarjeta durante el repaso. */
-export function formatReviewCard(card: CardDto): string {
-  const lines = [
-    `🎴 ${card.front}`,
-    card.pronunciation ? `🗣 ${card.pronunciation}` : '',
-    card.explanation ? `📖 ${card.explanation}` : '',
-    '',
-    '¿Cómo se dice? (escríbelo o pulsa un botón)',
-  ].filter((l) => l !== '')
+/** Paso 1 (Anki): SOLO el front + botón "Ver traducción". */
+export function reviewFrontKeyboard(): { inline_keyboard: InlineKeyboardButton[][] } {
+  return { inline_keyboard: [[{ text: '👁️ Ver traducción', callback_data: 'ver-traduccion' }]] }
+}
+
+/** Paso 2 (Anki): traducción visible + explicación + calificación. */
+export function reviewBackKeyboard(): { inline_keyboard: InlineKeyboardButton[][] } {
+  return {
+    inline_keyboard: [
+      [{ text: '📖 Explicación', callback_data: 'explicacion' }],
+      [
+        { text: '🙈 No sabía', callback_data: 'grade0' },
+        { text: '😓 Difícil', callback_data: 'grade1' },
+      ],
+      [
+        { text: '😐 Normal', callback_data: 'grade3' },
+        { text: '😊 Fácil', callback_data: 'grade4' },
+        { text: '🔥 Domino', callback_data: 'grade5' },
+      ],
+    ],
+  }
+}
+
+/** Paso 1: front únicamente. */
+export function formatReviewCardFront(card: CardDto): string {
+  return `🎴 ${card.front}`
+}
+
+/** Paso 2: front + back. */
+export function formatReviewCardBack(card: CardDto): string {
+  const lines = [`🎴 ${card.front}`, `💬 ${card.back}`]
+  if (card.pronunciation) lines.push(`🗣 ${card.pronunciation}`)
   return lines.join('\n')
+}
+
+/** Paso 3: front + back + explicación gramatical + ejemplos. */
+export function formatReviewCardExplain(card: CardDto): string {
+  const lines = [`🎴 ${card.front}`, `💬 ${card.back}`]
+  if (card.pronunciation) lines.push(`🗣 ${card.pronunciation}`)
+  if (card.explanation) lines.push(`\n📖 ${card.explanation}`)
+  let examples: string[] = []
+  try {
+    examples = JSON.parse(card.examples)
+  } catch {
+    examples = []
+  }
+  if (examples.length > 0) {
+    lines.push('✨ Ejemplos:')
+    for (const ex of examples.slice(0, 3)) lines.push(`• ${ex}`)
+  }
+  return lines.join('\n')
+}
+
+/** Texto de la tarjeta durante el repaso (compatibilidad: fase revelada). */
+export function formatReviewCard(card: CardDto): string {
+  return formatReviewCardBack(card)
 }
 
 export function formatReviewSummary(correct: number, wrong: number, total: number): string {

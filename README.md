@@ -8,7 +8,8 @@ botones SM-2 (grade0/1/3/4/5), entrevista progresiva y recordatorios cada
 ## Stack
 
 - Node 22+, Express + TypeScript, patrón eva-youtube-bot (poller propio)
-- Solo Jei (7026212206) está autorizado; el resto se ignora silenciosamente
+- Allowlist: solo **Jei (7026212206)** y **Jessi (7181079278)**; cualquier
+  otro remitente se ignora silenciosamente (recordatorios y pings incluidos)
 - Estado persistente en `data/dutch/` (offset del polling + último recordatorio)
 
 ## Intents (español)
@@ -16,7 +17,7 @@ botones SM-2 (grade0/1/3/4/5), entrevista progresiva y recordatorios cada
 | Frase | Acción |
 |---|---|
 | `¿cómo se dice X?` / `aprender esta frase: X` / `guarda esta palabra: X` | Traduce (LLM) y crea la tarjeta (sin duplicados) |
-| `repaso` / `dame 10 frases` / `examen rápido` / `solo palabras difíciles` | Sesión de repaso: tarjetas vencidas una a una con botones |
+| `repaso` / `dame 10 frases` / `examen rápido` / `solo palabras difíciles` | Sesión de repaso estilo Anki: front → 👁️ Ver traducción → 📖 Explicación → calificación (botones) |
 | `estadísticas` | Resumen del progreso |
 | `pendientes` | Cuántas frases quedan para hoy |
 | `hola` | Presentación + entrevista progresiva (nombre → profesión → hobbies → /student) |

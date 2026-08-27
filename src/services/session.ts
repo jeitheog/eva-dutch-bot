@@ -13,6 +13,10 @@ export interface ReviewSession {
   correct: number
   wrong: number
   cardShownAt: number
+  /** ¿La traducción ya está visible? (flujo Anki por pasos). */
+  revealed: boolean
+  /** message_id del mensaje con la tarjeta actual (para editar en el paso 2/3). */
+  messageId: number | null
 }
 
 export interface InterviewSession {
@@ -34,7 +38,7 @@ export function setSession(chatId: number, session: Session): void {
 }
 
 export function newReviewSession(queue: CardDto[]): ReviewSession {
-  return { mode: 'review', queue, idx: 0, correct: 0, wrong: 0, cardShownAt: Date.now() }
+  return { mode: 'review', queue, idx: 0, correct: 0, wrong: 0, cardShownAt: Date.now(), revealed: false, messageId: null }
 }
 
 export function currentCard(s: ReviewSession): CardDto | undefined {

@@ -17,10 +17,14 @@ import path from 'node:path'
 import { config } from '../config'
 import { createTelegramClient, type TelegramClient, type TelegramUpdate } from './telegram'
 import {
-  formatReviewCard,
+  formatReviewCardBack,
+  formatReviewCardExplain,
+  formatReviewCardFront,
   formatReviewSummary,
   handleSimpleIntent,
   parseIntent,
+  reviewBackKeyboard,
+  reviewFrontKeyboard,
   reviewKeyboard,
   evaluateAnswer,
   INTRO_TEXT,
@@ -116,15 +120,38 @@ export function buildIntentDeps(client: TelegramClient): IntentDeps {
   }
 }
 
-// ── Flujo de repaso ────────────────────────────────────────────────────────
+// ── Flujo de repaso (estilo Anki, por pasos) ───────────────────────────────
 
+/** Paso 1: nuevo mensaje con SOLO el front + botón "Ver traducción". */
 async function showCard(client: TelegramClient, chatId: number): Promise<void> {
   const session = getSession(chatId)
   if (!session || session.mode !== 'review') return
   const card = currentCard(session)
   if (!card) return
   session.cardShownAt = Date.now()
-  await client.sendMessage(chatId, formatReviewCard(card), reviewKeyboard())
+  session.revealed = false
+  session.messageId = null
+  const sent = await client.sendMessage(chatId, formatReviewCardFront(card), reviewFrontKeyboard())
+  session.messageId = sent.message_id
+}
+
+/** Paso 2: el usuario pide la traducción → editar el mensaje (back + calificar). */
+async function revealCard(client: TelegramClient, chatId: number): Promise<void> {
+  const session = getSession(chatId)
+  if (!session || session.mode !== 'review' || session.revealed) return
+  const card = currentCard(session)
+  if (!card || !session.messageId) return
+  session.revealed = true
+  await client.editMessageText(chatId, session.messageId, formatReviewCardBack(card), reviewBackKeyboard())
+}
+
+/** Paso 3: el usuario pide la explicación → editar el mensaje (explicación + ejemplos). */
+async function explainCard(client: TelegramClient, chatId: number): Promise<void> {
+  const session = getSession(chatId)
+  if (!session || session.mode !== 'review' || !session.revealed) return
+  const card = currentCard(session)
+  if (!card || !session.messageId) return
+  await client.editMessageText(chatId, session.messageId, formatReviewCardExplain(card), reviewKeyboard())
 }
 
 async function advanceSession(client: TelegramClient, chatId: number): Promise<void> {
@@ -143,6 +170,7 @@ async function gradeCurrentCard(
   client: TelegramClient,
   chatId: number,
   grade: number,
+  deps: IntentDeps,
   extraNote?: string
 ): Promise<void> {
   const session = getSession(chatId)
@@ -150,7 +178,7 @@ async function gradeCurrentCard(
   const card = currentCard(session)
   if (!card) return
   const latency = Date.now() - session.cardShownAt
-  await buildIntentDeps(client).postReview(card.id, grade, Math.max(0, latency))
+  await deps.postReview(card.id, grade, Math.max(0, latency))
   if (grade < 3) session.wrong += 1
   else session.correct += 1
   if (extraNote) await client.sendMessage(chatId, extraNote)
@@ -158,14 +186,23 @@ async function gradeCurrentCard(
 }
 
 /** Respuesta libre durante el repaso → evaluar por palabras clave. */
-async function handleReviewAnswer(client: TelegramClient, chatId: number, text: string): Promise<void> {
+async function handleReviewAnswer(client: TelegramClient, chatId: number, text: string, deps: IntentDeps): Promise<void> {
   const session = getSession(chatId)
   if (!session || session.mode !== 'review') return
   const card = currentCard(session)
   if (!card) return
   const { grade, matched } = evaluateAnswer(text, card.back)
-  const note = matched ? undefined : `La respuesta era: ${card.back}`
-  await gradeCurrentCard(client, chatId, grade, note)
+  // Si aún no estaba revelada, la revelamos (el usuario respondió al front).
+  if (!session.revealed && session.messageId) {
+    try {
+      await client.editMessageText(chatId, session.messageId, formatReviewCardBack(card), reviewBackKeyboard())
+      session.revealed = true
+    } catch {
+      /* si el edit falla, seguimos igual */
+    }
+  }
+  const note = matched ? '✅ ¡Correcto!' : `❌ La respuesta era: ${card.back}`
+  await gradeCurrentCard(client, chatId, grade, deps, note)
 }
 
 // ── Entrevista progresiva ──────────────────────────────────────────────────
@@ -199,7 +236,11 @@ async function handleInterviewAnswer(client: TelegramClient, chatId: number, tex
 
 // ── Procesado de updates ───────────────────────────────────────────────────
 
-export async function handleUpdate(client: TelegramClient, update: TelegramUpdate): Promise<void> {
+export async function handleUpdate(
+  client: TelegramClient,
+  update: TelegramUpdate,
+  depsFactory: (client: TelegramClient) => IntentDeps = buildIntentDeps
+): Promise<void> {
   const message = update.message
   const callback = update.callback_query
 
@@ -207,9 +248,18 @@ export async function handleUpdate(client: TelegramClient, update: TelegramUpdat
     if (shouldProcess(callback.message?.chat, callback.from.id) !== 'process') return
     const chatId = callback.message!.chat.id
     await client.answerCallbackQuery(callback.id)
-    const gradeMatch = /^grade([0-5])$/.exec(callback.data ?? '')
+    const data = callback.data ?? ''
+    if (data === 'ver-traduccion') {
+      await revealCard(client, chatId)
+      return
+    }
+    if (data === 'explicacion') {
+      await explainCard(client, chatId)
+      return
+    }
+    const gradeMatch = /^grade([0-5])$/.exec(data)
     if (gradeMatch) {
-      await gradeCurrentCard(client, chatId, Number(gradeMatch[1]))
+      await gradeCurrentCard(client, chatId, Number(gradeMatch[1]), depsFactory(client))
     }
     return
   }
@@ -219,11 +269,12 @@ export async function handleUpdate(client: TelegramClient, update: TelegramUpdat
 
   const chatId = message.chat.id
   const text = (message.text ?? message.caption ?? '').trim()
+  const deps = depsFactory(client)
 
   // Sesión activa de repaso: texto libre = respuesta a la tarjeta.
   const session = getSession(chatId)
   if (session?.mode === 'review' && text && !isCommand(text)) {
-    await handleReviewAnswer(client, chatId, text)
+    await handleReviewAnswer(client, chatId, text, deps)
     pollerState.messages_processed += 1
     return
   }
@@ -234,7 +285,6 @@ export async function handleUpdate(client: TelegramClient, update: TelegramUpdat
   }
 
   const intent = parseIntent(text)
-  const deps = buildIntentDeps(client)
 
   if (intent.type === 'review') {
     try {

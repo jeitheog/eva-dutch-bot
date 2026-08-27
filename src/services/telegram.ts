@@ -50,6 +50,12 @@ export interface TelegramClient {
     text: string,
     replyMarkup?: { inline_keyboard: InlineKeyboardButton[][] }
   ): Promise<{ message_id: number }>
+  editMessageText(
+    chatId: number | string,
+    messageId: number,
+    text: string,
+    replyMarkup?: { inline_keyboard: InlineKeyboardButton[][] }
+  ): Promise<{ message_id: number }>
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<boolean>
 }
 
@@ -94,6 +100,13 @@ export function createTelegramClient(opts: {
     sendMessage: (chatId, text, replyMarkup) =>
       call<{ message_id: number }>('sendMessage', {
         chat_id: chatId,
+        text,
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      }),
+    editMessageText: (chatId, messageId, text, replyMarkup) =>
+      call<{ message_id: number }>('editMessageText', {
+        chat_id: chatId,
+        message_id: messageId,
         text,
         ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
       }),

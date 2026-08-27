@@ -6,6 +6,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
+import { config } from '../config'
 import type { TelegramClient } from '../services/telegram'
 import { pollerState } from '../services/poller'
 import { reminderState } from '../services/reminder'
@@ -34,6 +35,11 @@ export function statusRouter(client: TelegramClient): Router {
     const parsed = pingSchema.safeParse(req.body)
     if (!parsed.success) {
       return res.status(400).json({ error: 'Datos inválidos', issues: parsed.error.issues })
+    }
+    const chatId = Number(parsed.data.chat_id)
+    // Seguridad: los pings solo pueden ir a los chats autorizados (Jei/Jessi).
+    if (!config.authorizedUserIds.includes(chatId)) {
+      return res.status(403).json({ error: 'chat_id no autorizado' })
     }
     try {
       const result = await client.sendMessage(parsed.data.chat_id, parsed.data.text)

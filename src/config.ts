@@ -14,8 +14,8 @@ export const config = {
   serviceApiKey: process.env.DUTCH_SERVICE_API_KEY ?? '',
   /** Estado persistente del poller y recordatorios. */
   dataDir: path.join(APP_DIR, 'data', 'dutch'),
-  /** Único dueño autorizado: Jei. El resto se ignora silenciosamente. */
-  authorizedUserIds: [7026212206],
+  /** Dueños autorizados: Jei y Jessi. El resto se ignora silenciosamente. */
+  authorizedUserIds: [7026212206, 7181079278],
   /** Long-polling de Telegram. */
   pollTimeoutSec: 30,
   /** Recordatorios automáticos: cada 4h. */
