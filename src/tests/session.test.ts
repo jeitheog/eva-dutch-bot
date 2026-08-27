@@ -68,7 +68,7 @@ test('teclados del repaso: front (ver traducción) y back (explicación + grades
 })
 
 test('sessions por chat: set/get independientes', () => {
-  setSession(111, { mode: 'review', queue: [], idx: 0, correct: 0, wrong: 0, cardShownAt: 0, revealed: false, messageId: null })
+  setSession(111, { mode: 'review', queue: [], idx: 0, correct: 0, wrong: 0, cardShownAt: 0, revealed: false, messageId: null, seen: [] })
   setSession(222, { mode: 'interview', step: 'nombre' })
   assert.equal(getSession(111)?.mode, 'review')
   assert.equal(getSession(222)?.mode, 'interview')

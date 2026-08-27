@@ -18,6 +18,8 @@ botones SM-2 (grade0/1/3/4/5), entrevista progresiva y recordatorios cada
 |---|---|
 | `¿cómo se dice X?` / `aprender esta frase: X` / `guarda esta palabra: X` | Traduce (LLM) y crea la tarjeta (sin duplicados) |
 | `repaso` / `dame 10 frases` / `examen rápido` / `solo palabras difíciles` | Sesión de repaso estilo Anki: front → 👁️ Ver traducción → 📖 Explicación → calificación (botones) |
+| `sigue` / `siguiente` / `siguiente frase` / `otra` | Durante un repaso: salta a la siguiente tarjeta y recarga la cola si se agotó (sin límite de N); sin sesión activa, arranca un repaso |
+| `para` / `basta` / `stop` / `termina` | Termina la sesión de repaso con el resumen |
 | `estadísticas` | Resumen del progreso |
 | `pendientes` | Cuántas frases quedan para hoy |
 | `hola` | Presentación + entrevista progresiva (nombre → profesión → hobbies → /student) |

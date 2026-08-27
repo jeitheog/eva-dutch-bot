@@ -12,6 +12,8 @@ import {
   handleSimpleIntent,
   parseIntent,
   reviewKeyboard,
+  CONTINUE_RE,
+  STOP_RE,
   type IntentDeps,
 } from '../services/intents'
 import type { CardDto, DueStatusResponse, StatsResponse, TranslateResponse } from '../services/dutch'
@@ -45,6 +47,27 @@ test('parseIntent: "repaso" / "repasamos 5 minutos" / "dame 10 frases" → revie
   assert.equal(parseIntent('vamos a practicar').type, 'review')
   assert.equal(parseIntent('solo palabras difíciles').type, 'review')
   assert.equal(parseIntent('examen rápido').type, 'review')
+})
+
+test('parseIntent: "sigue"/"siguiente"/"otra" (sin sesión activa) → review', () => {
+  assert.equal(parseIntent('sigue').type, 'review')
+  assert.equal(parseIntent('siguiente').type, 'review')
+  assert.equal(parseIntent('siguiente frase').type, 'review')
+  assert.equal(parseIntent('otra').type, 'review')
+})
+
+test('comandos de control del repaso: CONTINUE_RE / STOP_RE', () => {
+  assert.ok(CONTINUE_RE.test('sigue'))
+  assert.ok(CONTINUE_RE.test('siguiente'))
+  assert.ok(CONTINUE_RE.test('siguiente frase'))
+  assert.ok(CONTINUE_RE.test('otra'))
+  assert.ok(!CONTINUE_RE.test('siguientes pasos'), 'plural no es comando')
+  assert.ok(STOP_RE.test('para'))
+  assert.ok(STOP_RE.test('basta'))
+  assert.ok(STOP_RE.test('stop'))
+  assert.ok(STOP_RE.test('termina'))
+  assert.ok(!STOP_RE.test('paraguas'), '"para" exige límite de palabra')
+  assert.ok(!STOP_RE.test('terminado'), '"termina" no debe casar "terminado"')
 })
 
 test('parseIntent: "estadísticas" / "estadisticas" → stats', () => {

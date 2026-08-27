@@ -164,7 +164,73 @@ test('callback de intruso → ignorado silenciosamente (sin answerCallbackQuery)
   const card = makeCard(1, 'Hallo', 'Hola')
   const { client, calls } = makeFakeClient()
   const { deps } = makeFakeDeps([card])
-  setSession(JEI, { mode: 'review', queue: [card], idx: 0, correct: 0, wrong: 0, cardShownAt: 0, revealed: true, messageId: 42 })
+  setSession(JEI, { mode: 'review', queue: [card], idx: 0, correct: 0, wrong: 0, cardShownAt: 0, revealed: true, messageId: 42, seen: [] })
   await handleUpdate(client, callbackUpdate(JEI, INTRUSO, 'grade5'), () => deps)
   assert.equal(calls.length, 0, 'nada se envió')
+})
+
+test('"sigue" salta la tarjeta sin calificar, recarga la cola (sin límite de N) y termina al agotarse', async () => {
+  const card1 = makeCard(1, 'Hallo', 'Hola')
+  const card2 = makeCard(2, 'Dank je', 'Gracias')
+  const { client, calls } = makeFakeClient()
+  // El mock SIEMPRE devuelve [card1, card2] (siguen vencidas); el filtro de
+  // "seen" evita repetir las ya mostradas en esta sesión.
+  const { deps, reviews } = makeFakeDeps([card1, card2])
+
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'repaso'), () => deps)
+  assert.equal(reviews.length, 0)
+
+  // "sigue" → salta card1 SIN calificar → muestra card2
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'sigue'), () => deps)
+  const sends = calls.filter((c) => c.method === 'sendMessage')
+  assert.equal((sends[sends.length - 1].args[1] as string), '🎴 Dank je')
+  assert.equal(reviews.length, 0, 'saltar no califica')
+
+  // "siguiente frase" → salta card2 → cola agotada → recarga filtrada vacía → fin
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'siguiente frase'), () => deps)
+  const last = calls.filter((c) => c.method === 'sendMessage').pop()!
+  assert.ok((last.args[1] as string).includes('Se acabaron las pendientes'))
+  assert.equal(sessions.size, 0, 'sesión cerrada')
+})
+
+test('"sigue" con recarga real: la cola nueva se muestra (más de N tarjetas)', async () => {
+  const card1 = makeCard(1, 'Hallo', 'Hola')
+  const card2 = makeCard(2, 'Dank je', 'Gracias')
+  const card3 = makeCard(3, 'Tot ziens', 'Hasta luego')
+  const { client, calls } = makeFakeClient()
+  // Primera llamada devuelve [card1, card2]; la recarga devuelve [card3] (nueva).
+  let callsN = 0
+  const queue = [
+    [card1, card2],
+    [card3],
+  ]
+  const deps: IntentDeps = {
+    ...makeFakeDeps([]).deps,
+    getReviewQueue: async () => queue[Math.min(callsN++, queue.length - 1)],
+  }
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'repaso'), () => deps)
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'sigue'), () => deps) // salta card1 → card2
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'otra'), () => deps) // salta card2 → cola agotada → recarga → card3
+  const sends = calls.filter((c) => c.method === 'sendMessage')
+  assert.equal((sends[sends.length - 1].args[1] as string), '🎴 Tot ziens')
+  assert.equal(sessions.size, 1, 'la sesión sigue viva tras la recarga')
+})
+
+test('"para"/"basta"/"stop"/"termina" terminan la sesión con el resumen', async () => {
+  const cards = [makeCard(1, 'Dank je wel', 'Muchas gracias'), makeCard(2, 'Tot ziens', 'Hasta luego')]
+  const { client, calls } = makeFakeClient()
+  const { deps, reviews } = makeFakeDeps(cards)
+
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'repaso'), () => deps)
+  // Respuesta libre correcta a la tarjeta 1 → grade 5 → avanza a la 2
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'muchas gracias'), () => deps)
+  assert.equal(reviews.length, 1)
+  assert.equal(reviews[0].grade, 5)
+
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'para'), () => deps)
+  const summary = calls.find((c) => c.method === 'sendMessage' && (c.args[1] as string).includes('Sesión completada'))
+  assert.ok(summary, 'resumen enviado')
+  assert.ok((summary!.args[1] as string).includes('1 bien'))
+  assert.equal(reviews.length, 1, 'no se calificó la tarjeta 2')
+  assert.equal(sessions.size, 0, 'sesión cerrada')
 })

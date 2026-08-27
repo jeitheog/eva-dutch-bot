@@ -27,6 +27,8 @@ import {
   reviewFrontKeyboard,
   reviewKeyboard,
   evaluateAnswer,
+  CONTINUE_RE,
+  STOP_RE,
   INTRO_TEXT,
   type IntentDeps,
 } from './intents'
@@ -76,7 +78,7 @@ export function shouldProcess(
 
 /** ¿El texto es un comando que corta la sesión de repaso? */
 const COMMAND_RE =
-  /^(repaso|repasamos|repasemos|estad[ií]sticas?|estadisticas|pendientes|hola|inicio|ayuda|help|comandos|dame\s+\d+\s+frases|vamos a practicar)\b/i
+  /^(repaso|repasamos|repasemos|estad[ií]sticas?|estadisticas|pendientes|hola|inicio|ayuda|help|comandos|dame\s+\d+\s+frases|vamos a practicar|sigue|siguiente|otra|para|basta|stop|termina)\b/i
 
 export function isCommand(text: string): boolean {
   return COMMAND_RE.test(text.trim())
@@ -128,6 +130,7 @@ async function showCard(client: TelegramClient, chatId: number): Promise<void> {
   if (!session || session.mode !== 'review') return
   const card = currentCard(session)
   if (!card) return
+  if (!session.seen.includes(card.id)) session.seen.push(card.id)
   session.cardShownAt = Date.now()
   session.revealed = false
   session.messageId = null
@@ -154,16 +157,57 @@ async function explainCard(client: TelegramClient, chatId: number): Promise<void
   await client.editMessageText(chatId, session.messageId, formatReviewCardExplain(card), reviewKeyboard())
 }
 
-async function advanceSession(client: TelegramClient, chatId: number): Promise<void> {
+async function advanceSession(client: TelegramClient, chatId: number, deps: IntentDeps): Promise<void> {
   const session = getSession(chatId)
   if (!session || session.mode !== 'review') return
   if (advance(session)) {
     await showCard(client, chatId)
   } else {
-    const summary = formatReviewSummary(session.correct, session.wrong, session.queue.length)
-    setSession(chatId, null)
-    await client.sendMessage(chatId, summary)
+    await refillOrEnd(client, chatId, deps)
   }
+}
+
+/**
+ * La cola se agotó: recarga más tarjetas vencidas (sin límite de N) o
+ * termina la sesión. Las tarjetas ya mostradas en esta sesión se filtran
+ * para no repetirlas (las saltadas con "sigue" siguen vencidas).
+ */
+async function refillOrEnd(client: TelegramClient, chatId: number, deps: IntentDeps): Promise<void> {
+  const session = getSession(chatId)
+  if (!session || session.mode !== 'review') return
+  try {
+    const more = (await deps.getReviewQueue(10)).filter((c) => !session.seen.includes(c.id))
+    if (more.length > 0) {
+      setSession(chatId, { ...session, queue: more, idx: 0 })
+      await showCard(client, chatId)
+    } else {
+      const graded = session.correct + session.wrong
+      const summary = formatReviewSummary(session.correct, session.wrong, graded)
+      setSession(chatId, null)
+      await client.sendMessage(chatId, summary + '\nSe acabaron las pendientes — ¿te genero más? (o añade frases)')
+    }
+  } catch (e) {
+    pollerState.last_error = `refill: ${(e as Error).message}`
+    setSession(chatId, null)
+    await client.sendMessage(chatId, '🚨 No pude cargar más tarjetas. Termino la sesión aquí.')
+  }
+}
+
+/** "sigue"/"siguiente"/"otra": salta la tarjeta actual sin calificarla y muestra la siguiente. */
+async function continueReview(client: TelegramClient, chatId: number, deps: IntentDeps): Promise<void> {
+  const session = getSession(chatId)
+  if (!session || session.mode !== 'review') return
+  await advanceSession(client, chatId, deps)
+}
+
+/** "para"/"basta"/"stop"/"termina": termina la sesión con el resumen. */
+async function stopReview(client: TelegramClient, chatId: number): Promise<void> {
+  const session = getSession(chatId)
+  if (!session || session.mode !== 'review') return
+  const graded = session.correct + session.wrong
+  const summary = formatReviewSummary(session.correct, session.wrong, graded)
+  setSession(chatId, null)
+  await client.sendMessage(chatId, summary)
 }
 
 async function gradeCurrentCard(
@@ -182,7 +226,7 @@ async function gradeCurrentCard(
   if (grade < 3) session.wrong += 1
   else session.correct += 1
   if (extraNote) await client.sendMessage(chatId, extraNote)
-  await advanceSession(client, chatId)
+  await advanceSession(client, chatId, deps)
 }
 
 /** Respuesta libre durante el repaso → evaluar por palabras clave. */
@@ -271,8 +315,20 @@ export async function handleUpdate(
   const text = (message.text ?? message.caption ?? '').trim()
   const deps = depsFactory(client)
 
-  // Sesión activa de repaso: texto libre = respuesta a la tarjeta.
+  // Sesión activa de repaso: comandos de control (sigue/para) o respuesta libre.
   const session = getSession(chatId)
+  if (session?.mode === 'review' && text) {
+    if (CONTINUE_RE.test(text)) {
+      await continueReview(client, chatId, deps)
+      pollerState.messages_processed += 1
+      return
+    }
+    if (STOP_RE.test(text)) {
+      await stopReview(client, chatId)
+      pollerState.messages_processed += 1
+      return
+    }
+  }
   if (session?.mode === 'review' && text && !isCommand(text)) {
     await handleReviewAnswer(client, chatId, text, deps)
     pollerState.messages_processed += 1
@@ -290,7 +346,7 @@ export async function handleUpdate(
     try {
       const queue = await deps.getReviewQueue(10)
       if (queue.length === 0) {
-        await client.sendMessage(chatId, '🎉 No tienes frases pendientes. ¡Disfruta del día!')
+        await client.sendMessage(chatId, 'Se acabaron las pendientes — ¿te genero más? (o añade frases)')
       } else {
         setSession(chatId, newReviewSession(queue))
         await showCard(client, chatId)

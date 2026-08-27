@@ -26,10 +26,20 @@ export const HELP_TEXT = [
   '• "¿cómo se dice <frase>?" — traduce y te la añade a tus tarjetas',
   '• "aprender esta frase: <frase>" — igual, para frases largas',
   '• "repaso" / "dame 10 frases" — sesión de repaso con botones',
+  '• "sigue" / "siguiente" / "otra" — durante un repaso, pasa a la siguiente tarjeta (sin parar hasta que digas "para")',
+  '• "para" / "basta" / "stop" / "termina" — termina la sesión de repaso con el resumen',
   '• "estadísticas" — tu progreso',
   '• "pendientes" — cuántas frases te quedan para hoy',
   '• "hola" — empezamos la entrevista y te conozco mejor',
 ].join('\n')
+
+/**
+ * Comandos de control de la sesión de repaso (texto libre, no botones):
+ * CONTINUE_RE → saltar a la siguiente tarjeta (recargando la cola si se
+ * agotó, sin límite de N); STOP_RE → terminar la sesión con el resumen.
+ */
+export const CONTINUE_RE = /^(sigue|siguiente frase|siguiente tarjeta|siguiente|otra)\b/i
+export const STOP_RE = /^(para|basta|stop|termina|terminar)\b/i
 
 export const INTRO_TEXT = [
   '🎓 ¡Hola! Soy Lingua, tu profesor de holandés.',
@@ -50,7 +60,7 @@ export function parseIntent(raw: string): Intent {
   if (translateMatch) return { type: 'translate', text: translateMatch[1].trim().replace(/[¿?]+$/, '') }
 
   const lower = text.toLowerCase().replace(/^[¿?¡!]+/, '').replace(/[¿?]+$/, '')
-  if (/^(repaso|repasamos|repasemos|repasito|vamos a practicar|practiquemos|practicar|a repasar|dame\s+\d+\s+frases|dame\s+frases|examen r[aá]pido|solo palabras dif[íi]ciles|siguiente|empezamos)\b/.test(lower)) {
+  if (/^(repaso|repasamos|repasemos|repasito|vamos a practicar|practiquemos|practicar|a repasar|dame\s+\d+\s+frases|dame\s+frases|examen r[aá]pido|solo palabras dif[íi]ciles|sigue|siguiente|otra|empezamos)\b/.test(lower)) {
     return { type: 'review' }
   }
   if (/^(estad[ií]sticas?|estadisticas|progreso|mi progreso|resumen)\b/.test(lower)) {
