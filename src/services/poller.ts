@@ -118,14 +118,18 @@ export function buildIntentDeps(client: TelegramClient): IntentDeps {
     getDueStatus: () => dutch.getDueStatus(),
     getStudent: () => dutch.getStudent(),
     updateStudent: (patch) => dutch.updateStudent(patch),
+    getAudio: (cardId) => dutch.getAudio(cardId),
     sendMessage: (id, t, markup) => client.sendMessage(id, t, markup),
   }
 }
 
 // ── Flujo de repaso (estilo Anki, por pasos) ───────────────────────────────
 
-/** Paso 1: nuevo mensaje con SOLO el front + botón "Ver traducción". */
-async function showCard(client: TelegramClient, chatId: number): Promise<void> {
+/**
+ * Paso 1: nota de voz de pronunciación + nuevo mensaje con SOLO el front y
+ * el botón "Ver traducción". Si el audio falla, el repaso sigue sin voz.
+ */
+async function showCard(client: TelegramClient, chatId: number, deps: IntentDeps): Promise<void> {
   const session = getSession(chatId)
   if (!session || session.mode !== 'review') return
   const card = currentCard(session)
@@ -134,6 +138,13 @@ async function showCard(client: TelegramClient, chatId: number): Promise<void> {
   session.cardShownAt = Date.now()
   session.revealed = false
   session.messageId = null
+  try {
+    const audio = await deps.getAudio(card.id)
+    await client.sendVoice(chatId, audio, formatReviewCardFront(card))
+  } catch (e) {
+    pollerState.last_error = `audio: ${(e as Error).message}`
+    console.error(`dutch-poller: sin audio para card ${card.id}: ${(e as Error).message}`)
+  }
   const sent = await client.sendMessage(chatId, formatReviewCardFront(card), reviewFrontKeyboard())
   session.messageId = sent.message_id
 }
@@ -161,7 +172,7 @@ async function advanceSession(client: TelegramClient, chatId: number, deps: Inte
   const session = getSession(chatId)
   if (!session || session.mode !== 'review') return
   if (advance(session)) {
-    await showCard(client, chatId)
+    await showCard(client, chatId, deps)
   } else {
     await refillOrEnd(client, chatId, deps)
   }
@@ -179,7 +190,7 @@ async function refillOrEnd(client: TelegramClient, chatId: number, deps: IntentD
     const more = (await deps.getReviewQueue(10)).filter((c) => !session.seen.includes(c.id))
     if (more.length > 0) {
       setSession(chatId, { ...session, queue: more, idx: 0 })
-      await showCard(client, chatId)
+      await showCard(client, chatId, deps)
     } else {
       const graded = session.correct + session.wrong
       const summary = formatReviewSummary(session.correct, session.wrong, graded)
@@ -349,7 +360,7 @@ export async function handleUpdate(
         await client.sendMessage(chatId, 'Se acabaron las pendientes — ¿te genero más? (o añade frases)')
       } else {
         setSession(chatId, newReviewSession(queue))
-        await showCard(client, chatId)
+        await showCard(client, chatId, deps)
       }
     } catch (e) {
       pollerState.last_error = `review: ${(e as Error).message}`

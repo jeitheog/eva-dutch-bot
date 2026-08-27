@@ -50,6 +50,8 @@ export interface TelegramClient {
     text: string,
     replyMarkup?: { inline_keyboard: InlineKeyboardButton[][] }
   ): Promise<{ message_id: number }>
+  /** Nota de voz (audio/ogg) — subida multipart; caption opcional. */
+  sendVoice(chatId: number | string, voice: Uint8Array, caption?: string): Promise<{ message_id: number }>
   editMessageText(
     chatId: number | string,
     messageId: number,
@@ -103,6 +105,23 @@ export function createTelegramClient(opts: {
         text,
         ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
       }),
+    sendVoice: async (chatId, voice, caption) => {
+      // sendVoice admite subida multipart (los JSON no llevan binario).
+      const form = new FormData()
+      form.append('chat_id', String(chatId))
+      form.append('voice', new Blob([voice as BlobPart], { type: 'audio/ogg' }), 'card.ogg')
+      if (caption) form.append('caption', caption)
+      const res = await fetchImpl(`${base}/sendVoice`, { method: 'POST', body: form })
+      const data = (await res.json()) as TgResponse<{ message_id: number }>
+      if (!data.ok) {
+        const err = new Error(`Telegram sendVoice: ${data.description ?? 'error desconocido'}`) as Error & {
+          code?: number
+        }
+        err.code = data.error_code
+        throw err
+      }
+      return data.result as { message_id: number }
+    },
     editMessageText: (chatId, messageId, text, replyMarkup) =>
       call<{ message_id: number }>('editMessageText', {
         chat_id: chatId,

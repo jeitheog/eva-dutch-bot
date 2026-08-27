@@ -157,6 +157,7 @@ test('handleSimpleIntent: translate con deps mock → formato de tarjeta', async
     getDueStatus: async () => ({ pendientes_hoy: 1, nuevas_disponibles: 20, dificiles: 0 }),
     getStudent: async () => ({ id: 1, nombre: '', nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
     updateStudent: async (p) => ({ id: 1, nombre: String(p.nombre ?? ''), nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
+    getAudio: async () => new Uint8Array(0),
     sendMessage: async () => ({}),
   }
   const resp = await handleSimpleIntent({ type: 'translate', text: 'dank je wel' }, deps, 7026212206)
@@ -175,6 +176,7 @@ test('handleSimpleIntent: fallo del servicio → mensaje de error honesto', asyn
     getDueStatus: async () => ({ pendientes_hoy: 0, nuevas_disponibles: 20, dificiles: 0 }),
     getStudent: async () => ({ id: 1, nombre: '', nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
     updateStudent: async (p) => ({ id: 1, nombre: String(p.nombre ?? ''), nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
+    getAudio: async () => new Uint8Array(0),
     sendMessage: async () => ({}),
   }
   const resp = await handleSimpleIntent({ type: 'translate', text: 'x' }, deps, 1)

@@ -79,6 +79,8 @@ export interface DutchServiceClient {
   getDueStatus(): Promise<DueStatusResponse>
   getStudent(): Promise<StudentResponse>
   updateStudent(patch: Record<string, unknown>): Promise<StudentResponse>
+  /** Audio ogg de pronunciación de una tarjeta (generado bajo demanda por el service). */
+  getAudio(cardId: number): Promise<Uint8Array>
   health(): Promise<{ ok: boolean }>
 }
 
@@ -119,6 +121,18 @@ export function createDutchClient(opts: { baseUrl?: string; apiKey?: string; fet
     getDueStatus: () => call<DueStatusResponse>('GET', '/api/v1/dutch/due/status'),
     getStudent: () => call<StudentResponse>('GET', '/api/v1/dutch/student'),
     updateStudent: (patch) => call<StudentResponse>('POST', '/api/v1/dutch/student', patch),
+    getAudio: async (cardId) => {
+      const res = await fetchImpl(`${baseUrl}/api/v1/dutch/audio/${cardId}`, {
+        headers: { 'x-dutch-service-api-key': apiKey },
+      })
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '')
+        throw new Error(
+          `eva-dutch-service GET /api/v1/dutch/audio/${cardId}: HTTP ${res.status} ${detail.slice(0, 200)}`
+        )
+      }
+      return new Uint8Array(await res.arrayBuffer())
+    },
     health: () => call<{ ok: boolean }>('GET', '/health'),
   }
 }

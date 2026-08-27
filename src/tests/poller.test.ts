@@ -40,6 +40,10 @@ function makeFakeClient(): { client: TelegramClient; calls: Call[] } {
       calls.push({ method: 'sendMessage', args: [_chatId, text, markup] })
       return { message_id: 100 + calls.length }
     },
+    sendVoice: async (_chatId, _voice, caption) => {
+      calls.push({ method: 'sendVoice', args: [_chatId, _voice, caption] })
+      return { message_id: 200 + calls.length }
+    },
     editMessageText: async (...args) => {
       calls.push({ method: 'editMessageText', args })
       return { message_id: 0 }
@@ -66,6 +70,7 @@ function makeFakeDeps(queue: CardDto[], onReview?: (cardId: number, grade: numbe
     getDueStatus: async () => ({ pendientes_hoy: 0, nuevas_disponibles: 20, dificiles: 0 }),
     getStudent: async () => ({ id: 1, nombre: '', nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
     updateStudent: async () => ({ id: 1, nombre: '', nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
+    getAudio: async () => new Uint8Array([1, 2, 3]),
     sendMessage: async () => ({}),
   }
   return { deps, reviews }
@@ -104,10 +109,14 @@ test('flujo Anki completo: repaso → front solo → ver-traduccion → explicac
   const { client, calls } = makeFakeClient()
   const { deps, reviews } = makeFakeDeps([card])
 
-  // 1) "repaso" → solo el front + botón ver-traducción
+  // 1) "repaso" → nota de voz ANTES del front + botón ver-traducción
   await handleUpdate(client, messageUpdate(JEI, JEI, 'repaso'), () => deps)
+  const voice = calls.find((c) => c.method === 'sendVoice')
+  assert.ok(voice, 'envió la nota de voz de pronunciación')
+  assert.equal(voice!.args[2], '🎴 Geef me de halter even', 'la voz lleva el front como caption')
   const first = calls.find((c) => c.method === 'sendMessage')
   assert.ok(first, 'envió el front')
+  assert.ok(calls.indexOf(voice!) < calls.indexOf(first!), 'la voz va antes del mensaje con botones')
   const frontText = first!.args[1] as string
   assert.equal(frontText, '🎴 Geef me de halter even')
   assert.ok(!frontText.includes('Dame la mancuerna'), 'front sin traducción')

@@ -228,6 +228,8 @@ export interface IntentDeps {
   getDueStatus(): Promise<DueStatusResponse>
   getStudent(): Promise<StudentResponse>
   updateStudent(patch: Record<string, unknown>): Promise<StudentResponse>
+  /** Audio ogg de pronunciación de la tarjeta (para la nota de voz del front). */
+  getAudio(cardId: number): Promise<Uint8Array>
   sendMessage(chatId: number | string, text: string, replyMarkup?: { inline_keyboard: InlineKeyboardButton[][] }): Promise<unknown>
 }
 
