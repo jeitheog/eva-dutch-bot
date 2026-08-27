@@ -1,0 +1,159 @@
+/**
+ * Tests de intents y lógica de Lingua Bot — node:test, mocks, sin red.
+ */
+
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  evaluateAnswer,
+  formatCardCreated,
+  formatPending,
+  formatStats,
+  handleSimpleIntent,
+  parseIntent,
+  reviewKeyboard,
+  type IntentDeps,
+} from '../services/intents'
+import type { CardDto, DueStatusResponse, StatsResponse, TranslateResponse } from '../services/dutch'
+
+test('parseIntent: "aprender esta frase: X" → translate con X', () => {
+  const i = parseIntent('aprender esta frase: Geef me de halter even')
+  assert.deepEqual(i, { type: 'translate', text: 'Geef me de halter even' })
+})
+
+test('parseIntent: "guarda esta palabra: X" → translate', () => {
+  const i = parseIntent('guarda esta palabra: mancuerna')
+  assert.deepEqual(i, { type: 'translate', text: 'mancuerna' })
+})
+
+test('parseIntent: "¿cómo se dice X?" → translate', () => {
+  const i = parseIntent('¿cómo se dice mancuerna?')
+  assert.equal(i.type, 'translate')
+  assert.equal((i as { text: string }).text, 'mancuerna')
+})
+
+test('parseIntent: "quiero aprender a decir X" → translate', () => {
+  const i = parseIntent('quiero aprender a decir dank je wel')
+  assert.equal(i.type, 'translate')
+  assert.equal((i as { text: string }).text, 'dank je wel')
+})
+
+test('parseIntent: "repaso" / "repasamos 5 minutos" / "dame 10 frases" → review', () => {
+  assert.equal(parseIntent('repaso').type, 'review')
+  assert.equal(parseIntent('repasamos 5 minutos').type, 'review')
+  assert.equal(parseIntent('dame 10 frases').type, 'review')
+  assert.equal(parseIntent('vamos a practicar').type, 'review')
+  assert.equal(parseIntent('solo palabras difíciles').type, 'review')
+  assert.equal(parseIntent('examen rápido').type, 'review')
+})
+
+test('parseIntent: "estadísticas" / "estadisticas" → stats', () => {
+  assert.equal(parseIntent('estadísticas').type, 'stats')
+  assert.equal(parseIntent('estadisticas').type, 'stats')
+  assert.equal(parseIntent('progreso').type, 'stats')
+})
+
+test('parseIntent: "pendientes" → pending', () => {
+  assert.equal(parseIntent('pendientes').type, 'pending')
+  assert.equal(parseIntent('¿cuántas frases me quedan?').type, 'pending')
+})
+
+test('parseIntent: "hola" → start, "ayuda" → help, basura → help', () => {
+  assert.equal(parseIntent('hola').type, 'start')
+  assert.equal(parseIntent('inicio').type, 'start')
+  assert.equal(parseIntent('ayuda').type, 'start')
+  assert.equal(parseIntent('fjdkalñ').type, 'help')
+  assert.equal(parseIntent('').type, 'help')
+})
+
+test('evaluateAnswer: coincidencia de palabras clave sin inventar', () => {
+  assert.equal(evaluateAnswer('Dame la mancuerna un momento', 'Dame la mancuerna un momento').grade, 5)
+  assert.equal(evaluateAnswer('dame la mancuerna', 'Dame la mancuerna un momento').grade, 5) // 3/4 palabras
+  const partial = evaluateAnswer('un momento', 'Dame la mancuerna un momento')
+  assert.equal(partial.grade, 3) // 2/4 palabras significativas ≥30%
+  const fail = evaluateAnswer('no sé qué es', 'Dame la mancuerna un momento')
+  assert.equal(fail.grade, 1)
+  assert.equal(fail.matched, false)
+})
+
+test('formatCardCreated: tarjeta creada vs duplicado', () => {
+  const created: TranslateResponse = {
+    nl: 'Hallo',
+    es: 'Hola',
+    pronunciation: 'já-lo',
+    explanation: 'Saludo informal.',
+    examples: ['Hallo!'],
+    used_llm: true,
+    duplicate: false,
+    card: {
+      id: 1, type: 'phrase', front: 'Hallo', back: 'Hola', nl: 'Hallo', es: 'Hola',
+      pronunciation: 'já-lo', explanation: 'Saludo informal.', grammar: '', examples: '[]',
+      context: '', category: 'general', source: 'manual', created_at: 0, due_at: 0,
+      interval_days: 0, ease: 2.5, repetitions: 0, lapses: 0, status: 'new',
+    },
+  }
+  const msg = formatCardCreated(created)
+  assert.ok(msg.includes('Perfecto'))
+  assert.ok(msg.includes('Hallo'))
+  assert.ok(msg.includes('já-lo'))
+
+  const dup = formatCardCreated({ ...created, duplicate: true, existing_id: 1 })
+  assert.equal(dup, 'Ya la tienes 😊')
+})
+
+test('formatPending / formatStats / reviewKeyboard', () => {
+  const due: DueStatusResponse = { pendientes_hoy: 7, nuevas_disponibles: 20, dificiles: 2 }
+  assert.ok(formatPending(due).includes('Tienes 7 frases pendientes'))
+  assert.ok(formatPending({ ...due, pendientes_hoy: 0 }).includes('No tienes frases pendientes'))
+  const stats: StatsResponse = {
+    total: 30, nuevas: 10, aprendiendo: 5, dominadas: 15, dificiles: 2,
+    pendientes_hoy: 7, racha: 3, aciertos_pct: 80, por_categoria: { general: 30 },
+  }
+  assert.ok(formatStats(stats).includes('80%'))
+  const kb = reviewKeyboard()
+  assert.equal(kb.inline_keyboard.flat().length, 5)
+  const grades = kb.inline_keyboard.flat().map((b) => b.callback_data)
+  assert.deepEqual(grades, ['grade0', 'grade1', 'grade3', 'grade4', 'grade5'])
+})
+
+test('handleSimpleIntent: translate con deps mock → formato de tarjeta', async () => {
+  const deps: IntentDeps = {
+    translate: async () => ({
+      nl: 'Dank je wel', es: 'Muchas gracias', pronunciation: '', explanation: '',
+      examples: [], used_llm: true, duplicate: false,
+      card: {
+        id: 2, type: 'phrase', front: 'Dank je wel', back: 'Muchas gracias', nl: 'Dank je wel', es: 'Muchas gracias',
+        pronunciation: '', explanation: '', grammar: '', examples: '[]', context: '',
+        category: 'general', source: 'manual', created_at: 0, due_at: 0,
+        interval_days: 0, ease: 2.5, repetitions: 0, lapses: 0, status: 'new',
+      },
+    }),
+    getReviewQueue: async () => [],
+    postReview: async () => ({ ok: true, card: {} as CardDto }),
+    getStats: async () => ({ total: 1, nuevas: 1, aprendiendo: 0, dominadas: 0, dificiles: 0, pendientes_hoy: 1, racha: 0, aciertos_pct: 0, por_categoria: {} }),
+    getDueStatus: async () => ({ pendientes_hoy: 1, nuevas_disponibles: 20, dificiles: 0 }),
+    getStudent: async () => ({ id: 1, nombre: '', nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
+    updateStudent: async (p) => ({ id: 1, nombre: String(p.nombre ?? ''), nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
+    sendMessage: async () => ({}),
+  }
+  const resp = await handleSimpleIntent({ type: 'translate', text: 'dank je wel' }, deps, 7026212206)
+  assert.ok(resp.includes('Dank je wel'))
+  assert.ok(resp.includes('Perfecto'))
+})
+
+test('handleSimpleIntent: fallo del servicio → mensaje de error honesto', async () => {
+  const deps: IntentDeps = {
+    translate: async () => {
+      throw new Error('HTTP 500')
+    },
+    getReviewQueue: async () => [],
+    postReview: async () => ({ ok: true, card: {} as CardDto }),
+    getStats: async () => ({ total: 0, nuevas: 0, aprendiendo: 0, dominadas: 0, dificiles: 0, pendientes_hoy: 0, racha: 0, aciertos_pct: 0, por_categoria: {} }),
+    getDueStatus: async () => ({ pendientes_hoy: 0, nuevas_disponibles: 20, dificiles: 0 }),
+    getStudent: async () => ({ id: 1, nombre: '', nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
+    updateStudent: async (p) => ({ id: 1, nombre: String(p.nombre ?? ''), nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
+    sendMessage: async () => ({}),
+  }
+  const resp = await handleSimpleIntent({ type: 'translate', text: 'x' }, deps, 1)
+  assert.ok(resp.startsWith('🚨'))
+})
