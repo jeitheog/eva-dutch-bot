@@ -61,6 +61,7 @@ function makeFakeDeps(queue: CardDto[], onReview?: (cardId: number, grade: numbe
   const deps: IntentDeps = {
     translate: async () => ({ nl: 'X', es: 'Y', pronunciation: '', explanation: '', examples: [], used_llm: true, duplicate: false }),
     getReviewQueue: async () => queue,
+    getCards: async () => [],
     postReview: async (cardId, grade, latencyMs) => {
       reviews.push({ card_id: cardId, grade, latency_ms: latencyMs })
       onReview?.(cardId, grade)
@@ -109,14 +110,20 @@ test('flujo Anki completo: repaso → front solo → ver-traduccion → explicac
   const { client, calls } = makeFakeClient()
   const { deps, reviews } = makeFakeDeps([card])
 
-  // 1) "repaso" → nota de voz ANTES del front + botón ver-traducción
+  // 1) "repaso" → front UNA sola vez (mensaje con botón) + nota de voz SIN caption
   await handleUpdate(client, messageUpdate(JEI, JEI, 'repaso'), () => deps)
   const voice = calls.find((c) => c.method === 'sendVoice')
   assert.ok(voice, 'envió la nota de voz de pronunciación')
-  assert.equal(voice!.args[2], '🎴 Geef me de halter even', 'la voz lleva el front como caption')
+  assert.equal(voice!.args[2], undefined, 'la voz va SIN caption: el front NO se duplica')
+  const frontOccurrences = calls.filter((c) => {
+    const text = typeof c.args[1] === 'string' ? c.args[1] : ''
+    const caption = typeof c.args[2] === 'string' ? c.args[2] : ''
+    return text.includes('Geef me de halter even') || caption.includes('Geef me de halter even')
+  })
+  assert.equal(frontOccurrences.length, 1, 'el front aparece UNA sola vez en todo el flujo')
   const first = calls.find((c) => c.method === 'sendMessage')
   assert.ok(first, 'envió el front')
-  assert.ok(calls.indexOf(voice!) < calls.indexOf(first!), 'la voz va antes del mensaje con botones')
+  assert.ok(calls.indexOf(voice!) > calls.indexOf(first!), 'la voz va DESPUÉS del mensaje con botones (no bloquea la tarjeta)')
   const frontText = first!.args[1] as string
   assert.equal(frontText, '🎴 Geef me de halter even')
   assert.ok(!frontText.includes('Dame la mancuerna'), 'front sin traducción')
@@ -142,13 +149,18 @@ test('flujo Anki completo: repaso → front solo → ver-traduccion → explicac
   const explainMarkup = explain.args[3] as { inline_keyboard: Array<Array<{ callback_data?: string }>> }
   assert.ok(explainMarkup.inline_keyboard.flat().some((b) => b.callback_data === 'grade5'))
 
-  // 4) grade3 → POST /review y resumen de sesión (cola de 1)
+  // 4) grade3 → POST /review; cola agotada → la sesión NO termina (solo "para")
   await handleUpdate(client, callbackUpdate(JEI, JEI, 'grade3'), () => deps)
   assert.equal(reviews.length, 1)
   assert.equal(reviews[0].card_id, 1)
   assert.equal(reviews[0].grade, 3)
+  const exhausted = calls.filter((c) => c.method === 'sendMessage').pop()!
+  assert.ok((exhausted.args[1] as string).includes('No encuentro más tarjetas'), 'avisa de que no hay material disponible')
+  assert.equal(sessions.size, 1, 'la sesión NO se cierra por falta de material: solo "para" la termina')
+  // 5) "para" → resumen y sesión cerrada
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'para'), () => deps)
   const summary = calls.find((c) => c.method === 'sendMessage' && (c.args[1] as string).includes('Sesión completada'))
-  assert.ok(summary, 'resumen enviado')
+  assert.ok(summary, 'resumen enviado al parar')
   assert.equal(sessions.size, 0, 'sesión cerrada')
 })
 
@@ -178,12 +190,12 @@ test('callback de intruso → ignorado silenciosamente (sin answerCallbackQuery)
   assert.equal(calls.length, 0, 'nada se envió')
 })
 
-test('"sigue" salta la tarjeta sin calificar, recarga la cola (sin límite de N) y termina al agotarse', async () => {
+test('"sigue" salta la tarjeta sin calificar; si NO queda nada la sesión sigue viva (solo "para" la cierra)', async () => {
   const card1 = makeCard(1, 'Hallo', 'Hola')
   const card2 = makeCard(2, 'Dank je', 'Gracias')
   const { client, calls } = makeFakeClient()
-  // El mock SIEMPRE devuelve [card1, card2] (siguen vencidas); el filtro de
-  // "seen" evita repetir las ya mostradas en esta sesión.
+  // El mock SIEMPRE devuelve [card1, card2] (siguen vencidas) y no hay nada
+  // más: ni nuevas, ni difíciles, ni aleatorias, ni generación (translate sin card).
   const { deps, reviews } = makeFakeDeps([card1, card2])
 
   await handleUpdate(client, messageUpdate(JEI, JEI, 'repaso'), () => deps)
@@ -195,11 +207,11 @@ test('"sigue" salta la tarjeta sin calificar, recarga la cola (sin límite de N)
   assert.equal((sends[sends.length - 1].args[1] as string), '🎴 Dank je')
   assert.equal(reviews.length, 0, 'saltar no califica')
 
-  // "siguiente frase" → salta card2 → cola agotada → recarga filtrada vacía → fin
+  // "siguiente frase" → salta card2 → todo agotado → la sesión NO se cierra
   await handleUpdate(client, messageUpdate(JEI, JEI, 'siguiente frase'), () => deps)
   const last = calls.filter((c) => c.method === 'sendMessage').pop()!
-  assert.ok((last.args[1] as string).includes('Se acabaron las pendientes'))
-  assert.equal(sessions.size, 0, 'sesión cerrada')
+  assert.ok((last.args[1] as string).includes('reintentar'), 'sugiere reintentar con "sigue" o terminar con "para"')
+  assert.equal(sessions.size, 1, 'la sesión sigue viva: el repaso no termina por falta de material')
 })
 
 test('"sigue" con recarga real: la cola nueva se muestra (más de N tarjetas)', async () => {
@@ -223,6 +235,60 @@ test('"sigue" con recarga real: la cola nueva se muestra (más de N tarjetas)', 
   const sends = calls.filter((c) => c.method === 'sendMessage')
   assert.equal((sends[sends.length - 1].args[1] as string), '🎴 Tot ziens')
   assert.equal(sessions.size, 1, 'la sesión sigue viva tras la recarga')
+})
+
+test('repaso infinito: cola de vencidas vacía → continúa con tarjetas nuevas (la sesión no para)', async () => {
+  const card1 = makeCard(1, 'Hallo', 'Hola')
+  const card2 = makeCard(2, 'Dank je', 'Gracias')
+  const card3 = makeCard(3, 'Tot ziens', 'Hasta luego')
+  const { client, calls } = makeFakeClient()
+  // La cola vencida solo trae card1; después solo quedan tarjetas nuevas.
+  const deps: IntentDeps = {
+    ...makeFakeDeps([]).deps,
+    getReviewQueue: async () => [card1],
+    getCards: async (status?: string) => (status === 'new' ? [card2, card3] : []),
+  }
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'repaso'), () => deps)
+  // Calificar card1 → cola agotada → recarga: vencidas vacía → nuevas [card2]
+  await handleUpdate(client, callbackUpdate(JEI, JEI, 'grade5'), () => deps)
+  const sends = calls.filter((c) => c.method === 'sendMessage')
+  assert.equal((sends[sends.length - 1].args[1] as string), '🎴 Dank je', 'continúa con una tarjeta nueva')
+  assert.equal(sessions.size, 1, 'la sesión NO termina por falta de vencidas')
+})
+
+test('repaso infinito: BD sin tarjetas → genera una frase del pool (LLM) y sigue — nunca se queda mudo', async () => {
+  const { client, calls } = makeFakeClient()
+  const generated = makeCard(99, 'Goedemorgen', 'Buenos días')
+  const translateCalls: Array<{ text: string; opts?: { addCard?: boolean } }> = []
+  const deps: IntentDeps = {
+    ...makeFakeDeps([]).deps,
+    getReviewQueue: async () => [],
+    getCards: async () => [],
+    translate: async (text, opts) => {
+      translateCalls.push({ text, opts })
+      return { nl: 'Goedemorgen', es: 'Buenos días', pronunciation: '', explanation: '', examples: [], used_llm: true, duplicate: false, card: generated }
+    },
+  }
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'repaso'), () => deps)
+  assert.ok(translateCalls.length >= 1, 'se llamó al LLM/pool para generar una frase')
+  assert.equal(translateCalls[0].opts?.addCard, true, 'genera la tarjeta con add_card')
+  const sends = calls.filter((c) => c.method === 'sendMessage')
+  assert.equal((sends[sends.length - 1].args[1] as string), '🎴 Goedemorgen', 'muestra la frase generada del pool')
+  assert.equal(sessions.size, 1, 'la sesión sigue viva con material generado')
+})
+
+test('"hola"/"inicio" → presentación breve y amable SIN entrevista ni preguntas', async () => {
+  const { client, calls } = makeFakeClient()
+  const { deps } = makeFakeDeps([])
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'hola'), () => deps)
+  const sends = calls.filter((c) => c.method === 'sendMessage')
+  assert.equal(sends.length, 1, 'un solo mensaje de saludo')
+  const text = sends[0].args[1] as string
+  assert.ok(text.includes('Lingua'), 'se presenta')
+  assert.ok(!text.includes('¿Cómo te llamas?'), 'sin pregunta de entrevista')
+  assert.ok(!text.includes('¿A qué te dedicas?'), 'sin pregunta de entrevista')
+  assert.ok(!text.toLowerCase().includes('hobbies'), 'sin pregunta de entrevista')
+  assert.equal(sessions.size, 0, 'no se crea ninguna sesión de entrevista')
 })
 
 test('"para"/"basta"/"stop"/"termina" terminan la sesión con el resumen', async () => {

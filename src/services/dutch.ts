@@ -74,6 +74,8 @@ export interface StudentResponse {
 export interface DutchServiceClient {
   translate(text: string, opts?: { addCard?: boolean; type?: string; category?: string }): Promise<TranslateResponse>
   getReviewQueue(limit?: number): Promise<CardDto[]>
+  /** Tarjetas por status ('new' | 'learning' | 'review' | 'mastered' | undefined = todas), orden created_at DESC. */
+  getCards(status?: string, limit?: number): Promise<CardDto[]>
   postReview(cardId: number, grade: number, latencyMs: number): Promise<{ ok: boolean; card: CardDto }>
   getStats(): Promise<StatsResponse>
   getDueStatus(): Promise<DueStatusResponse>
@@ -115,6 +117,12 @@ export function createDutchClient(opts: { baseUrl?: string; apiKey?: string; fet
         category: opts.category,
       }),
     getReviewQueue: (limit = 10) => call<{ cards: CardDto[] }>('GET', `/api/v1/dutch/review/queue?limit=${limit}`).then((r) => r.cards),
+    getCards: (status, limit = 100) => {
+      const qs = new URLSearchParams()
+      if (status) qs.set('status', status)
+      qs.set('limit', String(limit))
+      return call<{ cards: CardDto[] }>('GET', `/api/v1/dutch/cards?${qs.toString()}`).then((r) => r.cards)
+    },
     postReview: (cardId, grade, latencyMs) =>
       call<{ ok: boolean; card: CardDto }>('POST', '/api/v1/dutch/review', { card_id: cardId, grade, latency_ms: latencyMs }),
     getStats: () => call<StatsResponse>('GET', '/api/v1/dutch/stats'),
@@ -124,6 +132,9 @@ export function createDutchClient(opts: { baseUrl?: string; apiKey?: string; fet
     getAudio: async (cardId) => {
       const res = await fetchImpl(`${baseUrl}/api/v1/dutch/audio/${cardId}`, {
         headers: { 'x-dutch-service-api-key': apiKey },
+        // edge-tts genera bajo demanda (hasta ~60s la primera vez): un
+        // timeout de 30s evita que un audio lento/colgado bloquee el repaso.
+        signal: AbortSignal.timeout(30_000),
       })
       if (!res.ok) {
         const detail = await res.text().catch(() => '')

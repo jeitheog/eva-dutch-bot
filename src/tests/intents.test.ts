@@ -14,6 +14,8 @@ import {
   reviewKeyboard,
   CONTINUE_RE,
   STOP_RE,
+  INTRO_TEXT,
+  PHRASE_POOL,
   type IntentDeps,
 } from '../services/intents'
 import type { CardDto, DueStatusResponse, StatsResponse, TranslateResponse } from '../services/dutch'
@@ -68,6 +70,20 @@ test('comandos de control del repaso: CONTINUE_RE / STOP_RE', () => {
   assert.ok(STOP_RE.test('termina'))
   assert.ok(!STOP_RE.test('paraguas'), '"para" exige límite de palabra')
   assert.ok(!STOP_RE.test('terminado'), '"termina" no debe casar "terminado"')
+})
+
+test('INTRO_TEXT: presentación breve y amable SIN entrevista ni preguntas', () => {
+  assert.ok(INTRO_TEXT.includes('Lingua'))
+  assert.ok(INTRO_TEXT.includes('repaso'))
+  assert.ok(!INTRO_TEXT.includes('¿Cómo te llamas?'), 'sin pregunta de entrevista')
+  assert.ok(!INTRO_TEXT.includes('¿A qué te dedicas?'), 'sin pregunta de entrevista')
+  assert.ok(!INTRO_TEXT.toLowerCase().includes('entrevista'), 'no menciona la entrevista')
+})
+
+test('PHRASE_POOL: frases básicas en neerlandés para el repaso infinito', () => {
+  assert.ok(PHRASE_POOL.length >= 10, 'el pool tiene frases de sobra')
+  assert.ok(PHRASE_POOL.every((p) => p.trim().length > 0))
+  assert.ok(PHRASE_POOL.includes('dank je wel'))
 })
 
 test('parseIntent: "estadísticas" / "estadisticas" → stats', () => {
@@ -152,6 +168,7 @@ test('handleSimpleIntent: translate con deps mock → formato de tarjeta', async
       },
     }),
     getReviewQueue: async () => [],
+    getCards: async () => [],
     postReview: async () => ({ ok: true, card: {} as CardDto }),
     getStats: async () => ({ total: 1, nuevas: 1, aprendiendo: 0, dominadas: 0, dificiles: 0, pendientes_hoy: 1, racha: 0, aciertos_pct: 0, por_categoria: {} }),
     getDueStatus: async () => ({ pendientes_hoy: 1, nuevas_disponibles: 20, dificiles: 0 }),
@@ -171,6 +188,7 @@ test('handleSimpleIntent: fallo del servicio → mensaje de error honesto', asyn
       throw new Error('HTTP 500')
     },
     getReviewQueue: async () => [],
+    getCards: async () => [],
     postReview: async () => ({ ok: true, card: {} as CardDto }),
     getStats: async () => ({ total: 0, nuevas: 0, aprendiendo: 0, dominadas: 0, dificiles: 0, pendientes_hoy: 0, racha: 0, aciertos_pct: 0, por_categoria: {} }),
     getDueStatus: async () => ({ pendientes_hoy: 0, nuevas_disponibles: 20, dificiles: 0 }),

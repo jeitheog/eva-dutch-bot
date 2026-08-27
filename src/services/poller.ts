@@ -8,8 +8,10 @@
  *  - Mensaje libre durante una sesión de repaso → respuesta = traducción →
  *    se evalúa por palabras clave → POST /review → siguiente tarjeta.
  *  - Botones inline grade0/1/3/4/5 → POST /review → siguiente tarjeta.
- *  - Entrevista progresiva (hola): nombre → profesión → hobbies → /student.
+ *  - El repaso NO termina por falta de material: vencidas → nuevas →
+ *    difíciles → aleatorias → generadas (LLM/pool). Solo "para"/"basta"/"stop".
  *  - Intents simples (translate/stats/pending/start/help) → una respuesta.
+ *    "hola"/"inicio" → presentación breve, SIN entrevista.
  */
 
 import fs from 'node:fs'
@@ -30,14 +32,14 @@ import {
   CONTINUE_RE,
   STOP_RE,
   INTRO_TEXT,
+  PHRASE_POOL,
   type IntentDeps,
 } from './intents'
-import { createDutchClient, type DutchServiceClient } from './dutch'
+import { createDutchClient, type CardDto, type DutchServiceClient } from './dutch'
 import {
   advance,
   currentCard,
   getSession,
-  interviewQuestion,
   newReviewSession,
   setSession,
 } from './session'
@@ -113,6 +115,7 @@ export function buildIntentDeps(client: TelegramClient): IntentDeps {
   return {
     translate: (text, opts) => dutch.translate(text, { addCard: opts?.addCard ?? false }),
     getReviewQueue: (limit) => dutch.getReviewQueue(limit),
+    getCards: (status, limit) => dutch.getCards(status, limit),
     postReview: (cardId, grade, latencyMs) => dutch.postReview(cardId, grade, latencyMs),
     getStats: () => dutch.getStats(),
     getDueStatus: () => dutch.getDueStatus(),
@@ -126,8 +129,11 @@ export function buildIntentDeps(client: TelegramClient): IntentDeps {
 // ── Flujo de repaso (estilo Anki, por pasos) ───────────────────────────────
 
 /**
- * Paso 1: nota de voz de pronunciación + nuevo mensaje con SOLO el front y
- * el botón "Ver traducción". Si el audio falla, el repaso sigue sin voz.
+ * Paso 1: mensaje de texto con SOLO el front y el botón "Ver traducción",
+ * y después (sin bloquear la tarjeta) la nota de voz de pronunciación SIN
+ * caption — así el front se muestra UNA sola vez. Si el audio falla (edge-tts
+ * lento/caído al generar una tarjeta nueva), se reintenta una vez y se avisa
+ * de forma honesta; el repaso nunca se queda mudo ni se queda sin tarjeta.
  */
 async function showCard(client: TelegramClient, chatId: number, deps: IntentDeps): Promise<void> {
   const session = getSession(chatId)
@@ -138,15 +144,35 @@ async function showCard(client: TelegramClient, chatId: number, deps: IntentDeps
   session.cardShownAt = Date.now()
   session.revealed = false
   session.messageId = null
-  try {
-    const audio = await deps.getAudio(card.id)
-    await client.sendVoice(chatId, audio, formatReviewCardFront(card))
-  } catch (e) {
-    pollerState.last_error = `audio: ${(e as Error).message}`
-    console.error(`dutch-poller: sin audio para card ${card.id}: ${(e as Error).message}`)
-  }
+  // 1) El front, UNA sola vez, con los botones. Siempre llega.
   const sent = await client.sendMessage(chatId, formatReviewCardFront(card), reviewFrontKeyboard())
   session.messageId = sent.message_id
+  // 2) Nota de voz de pronunciación (sin caption) en segundo plano.
+  void sendCardVoice(client, chatId, card.id, deps)
+}
+
+/**
+ * Nota de voz de pronunciación. Se envía SIN caption (el front ya está en el
+ * mensaje de texto) y NO bloquea la tarjeta: si falla se reintenta una vez y,
+ * si sigue fallando, se avisa al usuario en lugar de fallar en silencio.
+ */
+async function sendCardVoice(client: TelegramClient, chatId: number, cardId: number, deps: IntentDeps): Promise<void> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const audio = await deps.getAudio(cardId)
+      await client.sendVoice(chatId, audio)
+      return
+    } catch (e) {
+      const msg = (e as Error).message
+      pollerState.last_error = `audio: ${msg}`
+      console.error(`dutch-poller: audio card ${cardId} (intento ${attempt}): ${msg}`)
+    }
+  }
+  try {
+    await client.sendMessage(chatId, '🔇 No pude generar la pronunciación de esta tarjeta. El repaso sigue igualmente.')
+  } catch {
+    /* si ni el aviso sale, no hay nada más que hacer */
+  }
 }
 
 /** Paso 2: el usuario pide la traducción → editar el mensaje (back + calificar). */
@@ -174,33 +200,105 @@ async function advanceSession(client: TelegramClient, chatId: number, deps: Inte
   if (advance(session)) {
     await showCard(client, chatId, deps)
   } else {
-    await refillOrEnd(client, chatId, deps)
+    await refillSession(client, chatId, deps)
   }
 }
 
+function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr]
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[a[i], a[j]] = [a[j], a[i]]
+  }
+  return a
+}
+
 /**
- * La cola se agotó: recarga más tarjetas vencidas (sin límite de N) o
- * termina la sesión. Las tarjetas ya mostradas en esta sesión se filtran
- * para no repetirlas (las saltadas con "sigue" siguen vencidas).
+ * Genera una tarjeta nueva con una frase del pool básico (vía translate con
+ * add_card; el service deduplica: si la frase ya existe devuelve la tarjeta
+ * existente). Prefiere frases aún no vistas en la sesión; si todas están
+ * vistas, cicla por la primera que funcione — nunca se queda mudo.
  */
-async function refillOrEnd(client: TelegramClient, chatId: number, deps: IntentDeps): Promise<void> {
+async function generateFreshCard(deps: IntentDeps, seen: number[]): Promise<CardDto | null> {
+  let fallback: CardDto | null = null
+  for (const phrase of PHRASE_POOL) {
+    try {
+      const t = await deps.translate(phrase, { addCard: true })
+      if (!t.card) continue
+      if (fallback === null) fallback = t.card
+      if (!seen.includes(t.card.id)) return t.card
+    } catch {
+      /* siguiente frase del pool */
+    }
+  }
+  return fallback
+}
+
+/**
+ * Carga la siguiente tanda de tarjetas para la sesión de repaso. El repaso
+ * NUNCA se queda sin material: primero las vencidas, y si no quedan, continúa
+ * con tarjetas nuevas → difíciles → aleatorias → y si la BD está vacía,
+ * genera una frase nueva (LLM/pool). Devuelve [] solo si absolutamente nada
+ * está disponible.
+ */
+async function loadMoreCards(deps: IntentDeps, seen: number[]): Promise<CardDto[]> {
+  const unseen = (cards: CardDto[]) => cards.filter((c) => !seen.includes(c.id))
+
+  // 1) Vencidas (cola normal del SRS).
+  const due = unseen(await deps.getReviewQueue(10))
+  if (due.length > 0) return due
+
+  // 2) Tarjetas nuevas (status 'new').
+  const fresh = unseen(await deps.getCards('new', 25))
+  if (fresh.length > 0) return fresh
+
+  // 3) Difíciles: las que están en aprendizaje (learning/review) con más
+  //    lapses o peor ease primero — las que más cuestan.
+  const [learning, review] = await Promise.all([
+    deps.getCards('learning', 25),
+    deps.getCards('review', 25),
+  ])
+  const hard = unseen([...learning, ...review]).sort(
+    (a, b) => b.lapses - a.lapses || a.ease - b.ease
+  )
+  if (hard.length > 0) return hard.slice(0, 10)
+
+  // 4) Aleatorias de todo el material (repaso libre).
+  const all = unseen(await deps.getCards(undefined, 100))
+  if (all.length > 0) return shuffle(all).slice(0, 10)
+
+  // 5) Sin nada en la BD → generar una frase nueva (LLM o pool).
+  const generated = await generateFreshCard(deps, seen)
+  return generated ? [generated] : []
+}
+
+/**
+ * La cola se agotó: recarga con el siguiente material disponible (vencidas →
+ * nuevas → difíciles → aleatorias → generadas). La sesión NO termina por
+ * falta de material: solo "para"/"basta"/"stop" la cierran. Si ni siquiera se
+ * puede generar (servicio caído), se avisa y el usuario puede reintentar con
+ * "sigue" o terminar con "para".
+ */
+async function refillSession(client: TelegramClient, chatId: number, deps: IntentDeps): Promise<void> {
   const session = getSession(chatId)
   if (!session || session.mode !== 'review') return
   try {
-    const more = (await deps.getReviewQueue(10)).filter((c) => !session.seen.includes(c.id))
+    const more = await loadMoreCards(deps, session.seen)
     if (more.length > 0) {
       setSession(chatId, { ...session, queue: more, idx: 0 })
       await showCard(client, chatId, deps)
     } else {
-      const graded = session.correct + session.wrong
-      const summary = formatReviewSummary(session.correct, session.wrong, graded)
-      setSession(chatId, null)
-      await client.sendMessage(chatId, summary + '\nSe acabaron las pendientes — ¿te genero más? (o añade frases)')
+      await client.sendMessage(
+        chatId,
+        '😅 No encuentro más tarjetas ni puedo generar nuevas ahora mismo. Di "sigue" para reintentar o "para" para terminar.'
+      )
     }
   } catch (e) {
     pollerState.last_error = `refill: ${(e as Error).message}`
-    setSession(chatId, null)
-    await client.sendMessage(chatId, '🚨 No pude cargar más tarjetas. Termino la sesión aquí.')
+    await client.sendMessage(
+      chatId,
+      '🚨 No pude cargar más tarjetas. Di "sigue" para reintentar o "para" para terminar.'
+    )
   }
 }
 
@@ -260,35 +358,6 @@ async function handleReviewAnswer(client: TelegramClient, chatId: number, text: 
   await gradeCurrentCard(client, chatId, grade, deps, note)
 }
 
-// ── Entrevista progresiva ──────────────────────────────────────────────────
-
-async function handleInterviewAnswer(client: TelegramClient, chatId: number, text: string): Promise<void> {
-  const session = getSession(chatId)
-  if (!session || session.mode !== 'interview') return
-  const deps = buildIntentDeps(client)
-  const step = session.step
-  if (step === 'nombre') {
-    await deps.updateStudent({ nombre: text.trim() })
-    setSession(chatId, { mode: 'interview', step: 'profesion' })
-    await client.sendMessage(chatId, interviewQuestion('profesion'))
-  } else if (step === 'profesion') {
-    await deps.updateStudent({ profesion: text.trim() })
-    setSession(chatId, { mode: 'interview', step: 'hobbies' })
-    await client.sendMessage(chatId, interviewQuestion('hobbies'))
-  } else {
-    const hobbies = text
-      .split(',')
-      .map((h) => h.trim())
-      .filter(Boolean)
-    await deps.updateStudent({ hobbies })
-    setSession(chatId, null)
-    await client.sendMessage(
-      chatId,
-      '¡Perfecto! Ya te conozco un poco mejor 😊\nDi "repaso" cuando quieras practicar, o "¿cómo se dice <frase>?" para aprender algo nuevo.'
-    )
-  }
-}
-
 // ── Procesado de updates ───────────────────────────────────────────────────
 
 export async function handleUpdate(
@@ -345,21 +414,22 @@ export async function handleUpdate(
     pollerState.messages_processed += 1
     return
   }
-  if (session?.mode === 'interview' && text && !isCommand(text)) {
-    await handleInterviewAnswer(client, chatId, text)
-    pollerState.messages_processed += 1
-    return
-  }
 
   const intent = parseIntent(text)
 
   if (intent.type === 'review') {
     try {
-      const queue = await deps.getReviewQueue(10)
-      if (queue.length === 0) {
-        await client.sendMessage(chatId, 'Se acabaron las pendientes — ¿te genero más? (o añade frases)')
+      // El repaso no termina por falta de material: si no hay vencidas, se
+      // continúa con nuevas/difíciles/aleatorias y, si la BD está vacía, se
+      // genera una frase nueva (LLM/pool).
+      const cards = await loadMoreCards(deps, [])
+      if (cards.length === 0) {
+        await client.sendMessage(
+          chatId,
+          '😅 No encuentro tarjetas para repasar ni puedo generar frases nuevas ahora mismo. Inténtalo en un momento.'
+        )
       } else {
-        setSession(chatId, newReviewSession(queue))
+        setSession(chatId, newReviewSession(cards))
         await showCard(client, chatId, deps)
       }
     } catch (e) {
@@ -367,19 +437,8 @@ export async function handleUpdate(
       await client.sendMessage(chatId, '🚨 No pude preparar el repaso. Inténtalo en un momento.')
     }
   } else if (intent.type === 'start') {
-    const isKnown = await deps
-      .getStudent()
-      .then((s) => Boolean(s.nombre))
-      .catch(() => false)
-    if (isKnown) {
-      await client.sendMessage(
-        chatId,
-        '🎓 ¡Hola de nuevo! Di "repaso" para practicar o "¿cómo se dice <frase>?" para aprender algo nuevo.'
-      )
-    } else {
-      setSession(chatId, { mode: 'interview', step: 'nombre' })
-      await client.sendMessage(chatId, INTRO_TEXT)
-    }
+    // Saludo breve y amable: SIN entrevista ni preguntas progresivas.
+    await client.sendMessage(chatId, INTRO_TEXT)
   } else {
     let response: string
     try {

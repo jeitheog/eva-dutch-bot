@@ -30,7 +30,7 @@ export const HELP_TEXT = [
   '• "para" / "basta" / "stop" / "termina" — termina la sesión de repaso con el resumen',
   '• "estadísticas" — tu progreso',
   '• "pendientes" — cuántas frases te quedan para hoy',
-  '• "hola" — empezamos la entrevista y te conozco mejor',
+  '• "hola" — presentación breve (sin entrevista): te explico qué puedo hacer',
 ].join('\n')
 
 /**
@@ -43,10 +43,40 @@ export const STOP_RE = /^(para|basta|stop|termina|terminar)\b/i
 
 export const INTRO_TEXT = [
   '🎓 ¡Hola! Soy Lingua, tu profesor de holandés.',
-  'Puedo guardar frases, traducirte y repasar contigo cada día.',
-  'Antes de empezar, una mini-entrevista:',
-  '¿Cómo te llamas?',
+  'Puedo traducirte frases, guardarlas y repasar contigo cada día.',
+  'Prueba: "¿cómo se dice <frase>?" para aprender algo nuevo,',
+  '"repaso" para practicar, "estadísticas" para ver tu progreso',
+  'o "ayuda" para ver todos los comandos.',
 ].join('\n')
+
+/**
+ * Pool de frases básicas (NL): si la BD se queda sin tarjetas durante un
+ * repaso, el bot genera una tarjeta nueva con estas frases (vía translate
+ * con add_card) para que la sesión nunca se quede muda. El service deduplica
+ * por front/nl, así que si la frase ya existe devuelve la tarjeta existente.
+ */
+export const PHRASE_POOL: string[] = [
+  'dank je wel',
+  'goedemorgen',
+  'goedenavond',
+  'tot ziens',
+  'alsjeblieft',
+  'hoe gaat het met je',
+  'ik begrijp het niet',
+  'waar is het station',
+  'hoeveel kost dit',
+  'ik wil graag een koffie',
+  'een biertje, alsjeblieft',
+  'de rekening, graag',
+  'ik hou van je',
+  'tot morgen',
+  'wat is dit',
+  'ik leer Nederlands',
+  'spreek je Engels',
+  'ik heb een vraag',
+  'geef me even de tijd',
+  'het spijt me',
+]
 
 /** Extrae el texto a traducir tras el prefijo de intent (permite ¿ inicial). */
 const TRANSLATE_RE =
@@ -223,6 +253,8 @@ export function evaluateAnswer(userText: string, back: string): { grade: number;
 export interface IntentDeps {
   translate(text: string, opts?: { addCard?: boolean }): Promise<TranslateResponse>
   getReviewQueue(limit?: number): Promise<CardDto[]>
+  /** Tarjetas por status ('new' | 'learning' | 'review' | 'mastered' | undefined = todas) — cola de respaldo del repaso infinito. */
+  getCards(status?: string, limit?: number): Promise<CardDto[]>
   postReview(cardId: number, grade: number, latencyMs: number): Promise<{ ok: boolean; card: CardDto }>
   getStats(): Promise<StatsResponse>
   getDueStatus(): Promise<DueStatusResponse>

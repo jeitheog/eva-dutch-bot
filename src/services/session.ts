@@ -1,7 +1,6 @@
 /**
- * Sesiones de Lingua: repaso (cola de tarjetas + botones SM-2) y entrevista
- * progresiva (nombre → profesión → hobbies → /student). Estado en memoria,
- * una sesión por chat (solo Jei, chat privado).
+ * Sesiones de Lingua: repaso (cola de tarjetas + botones SM-2). Estado en
+ * memoria, una sesión por chat (solo Jei/Jessi, chat privado).
  */
 
 import type { CardDto } from './dutch'
@@ -21,12 +20,7 @@ export interface ReviewSession {
   seen: number[]
 }
 
-export interface InterviewSession {
-  mode: 'interview'
-  step: 'nombre' | 'profesion' | 'hobbies'
-}
-
-export type Session = ReviewSession | InterviewSession | null
+export type Session = ReviewSession | null
 
 export const sessions = new Map<number, Session>()
 
@@ -51,16 +45,4 @@ export function currentCard(s: ReviewSession): CardDto | undefined {
 export function advance(s: ReviewSession): boolean {
   s.idx += 1
   return s.idx < s.queue.length
-}
-
-/** Preguntas de la entrevista progresiva. */
-export function interviewQuestion(step: InterviewSession['step']): string {
-  switch (step) {
-    case 'nombre':
-      return '¿Cómo te llamas?'
-    case 'profesion':
-      return 'Encantado. ¿A qué te dedicas?'
-    case 'hobbies':
-      return 'Genial. ¿Cuáles son tus hobbies? (sepáralos con comas)'
-  }
 }
