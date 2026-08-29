@@ -19,6 +19,7 @@ import {
   CONTINUE_RE,
   STOP_RE,
   INTRO_TEXT,
+  CLARIFICATION_TEXT,
   PHRASE_POOL,
   type Brain,
   type IntentDeps,
@@ -102,13 +103,20 @@ test('parseIntent: "pendientes" → pending', () => {
   assert.equal(parseIntent('¿cuántas frases me quedan?').type, 'pending')
 })
 
-test('parseIntent: "hola" → start, "ayuda" → start, basura → chat (cerebro NL)', () => {
+test('parseIntent: "hola" → start, "ayuda"/"comandos" → help, basura → chat (cerebro NL)', () => {
   assert.equal(parseIntent('hola').type, 'start')
   assert.equal(parseIntent('inicio').type, 'start')
-  assert.equal(parseIntent('ayuda').type, 'start')
+  assert.equal(parseIntent('ayuda').type, 'help')
+  assert.equal(parseIntent('comandos').type, 'help')
   assert.equal(parseIntent('fjdkalñ').type, 'chat')
   assert.equal(parseIntent('cuéntame algo').type, 'chat')
-  assert.equal(parseIntent('').type, 'help')
+  assert.equal(parseIntent('').type, 'chat')
+})
+
+test('CLARIFICATION_TEXT: pregunta breve y amable, nunca lista comandos', () => {
+  assert.ok(CLARIFICATION_TEXT.includes('¿Me lo dices de otra forma?'))
+  assert.ok(!CLARIFICATION_TEXT.includes('Comandos'))
+  assert.ok(!CLARIFICATION_TEXT.includes('•'))
 })
 
 test('evaluateAnswer: coincidencia de palabras clave sin inventar', () => {

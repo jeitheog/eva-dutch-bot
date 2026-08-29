@@ -45,11 +45,20 @@ export const STOP_RE = /^(para|basta|stop|termina|terminar)\b/i
 
 export const INTRO_TEXT = [
   '🎓 ¡Hola! Soy Lingua, tu profesor de holandés.',
-  'Puedo traducirte frases, guardarlas y repasar contigo cada día.',
-  'Prueba: "¿cómo se dice <frase>?" para aprender algo nuevo,',
-  '"repaso" para practicar, "estadísticas" para ver tu progreso',
-  'o "ayuda" para ver todos los comandos.',
+  'Puedo traducirte frases, guardarlas en tus tarjetas y hacer repaso contigo cada día.',
+  '¿Por dónde quieres empezar?',
+  'Y si algún día quieres ver todo lo que sé hacer, solo dime "ayuda".',
 ].join('\n')
+
+/**
+ * Respuesta por defecto cuando el mensaje es ambiguo o Lingua no entiende:
+ * UNA pregunta breve y amable en lenguaje natural. NUNCA una lista de
+ * comandos (esa solo sale si el usuario pide "ayuda"/"comandos").
+ * Se usa como fallback del cerebro NL (si el LLM falla) y como red de
+ * seguridad del intent 'chat'.
+ */
+export const CLARIFICATION_TEXT =
+  '🤔 No te he entendido del todo. ¿Me lo dices de otra forma?'
 
 /**
  * Pool de frases básicas (NL): si la BD se queda sin tarjetas durante un
@@ -86,7 +95,9 @@ const TRANSLATE_RE =
 
 export function parseIntent(raw: string): Intent {
   const text = (raw ?? '').trim()
-  if (!text) return { type: 'help' }
+  // Vacío o sin intent determinista → chat (cerebro NL). El menú de comandos
+  // SOLO sale si el usuario pide explícitamente "ayuda"/"comandos".
+  if (!text) return { type: 'chat' }
 
   const translateMatch = text.match(TRANSLATE_RE)
   if (translateMatch) return { type: 'translate', text: translateMatch[1].trim().replace(/[¿?]+$/, '') }
@@ -101,11 +112,15 @@ export function parseIntent(raw: string): Intent {
   if (/^(pendientes|cu[aá]ntas (frases|tarjetas) (pendientes|me quedan)|qu[eé] me queda|para hoy)\b/.test(lower)) {
     return { type: 'pending' }
   }
-  if (/^(hola|inicio|empezar|buenas|hey|ayuda|help|comandos|qu[eé] puedes hacer)\b/.test(lower)) {
+  // Saludo breve y amable; "ayuda"/"comandos" (explícito) → la lista de comandos.
+  if (/^(hola|inicio|empezar|buenas|hey|qu[eé] puedes hacer)\b/.test(lower)) {
     return { type: 'start' }
   }
+  if (/^(ayuda|help|comandos)\b/.test(lower)) {
+    return { type: 'help' }
+  }
   // Sin intent determinista: el poller lo deriva al cerebro de lenguaje
-  // natural (LLM con el rol de Lingua); si el LLM falla, cae a HELP_TEXT.
+  // natural (LLM con el rol de Lingua); si el LLM falla, pregunta en natural.
   return { type: 'chat' }
 }
 

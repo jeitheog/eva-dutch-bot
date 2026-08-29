@@ -32,7 +32,7 @@ import {
   CONTINUE_RE,
   STOP_RE,
   INTRO_TEXT,
-  HELP_TEXT,
+  CLARIFICATION_TEXT,
   PHRASE_POOL,
   type IntentDeps,
 } from './intents'
@@ -62,6 +62,7 @@ export function buildBrain(): Brain {
       'Escríbela en conversación natural, como Hermes: clara, cercana, breve, con emojis y con los datos reales del contexto.',
       'Usa SOLO los datos del contexto: nunca inventes traducciones, cifras ni progresos que no estén ahí.',
       'No enumeres comandos ni ofrezcas listas de opciones salvo que el usuario los pida explícitamente.',
+      'Si la petición del usuario es AMBIGUA o le falta información (p. ej. una frase suelta sin contexto), responde con UNA pregunta breve y amable pidiendo solo lo que falta; nunca asumas ni inventes.',
       'Responde solo con el texto final del mensaje, sin preámbulos ni explicaciones de tu proceso.',
     ].join('\n')
     const user = `Petición del usuario: «${req.userText || req.kind}»\n\nDatos reales (${req.kind}):\n${req.context}`
@@ -469,8 +470,9 @@ export async function handleUpdate(
     await client.sendMessage(chatId, INTRO_TEXT)
   } else if (intent.type === 'chat') {
     // Cerebro de lenguaje natural: sin intent determinista → el LLM responde
-    // con el rol de Lingua (fail-closed). Si el LLM falla → ayuda actual.
-    const nl = await nlBrainOrFallback(text, config.botRole, HELP_TEXT)
+    // con el rol de Lingua (fail-closed). Si el LLM falla → pregunta breve y
+    // amable en lenguaje natural (NUNCA el menú de comandos).
+    const nl = await nlBrainOrFallback(text, config.botRole, CLARIFICATION_TEXT)
     if (nl.response) {
       try {
         await client.sendMessage(chatId, nl.response)
