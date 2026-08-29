@@ -12,10 +12,15 @@ import {
   handleSimpleIntent,
   parseIntent,
   reviewKeyboard,
+  redactOrFallback,
+  buildTranslateContext,
+  buildStatsContext,
+  buildPendingContext,
   CONTINUE_RE,
   STOP_RE,
   INTRO_TEXT,
   PHRASE_POOL,
+  type Brain,
   type IntentDeps,
 } from '../services/intents'
 import type { CardDto, DueStatusResponse, StatsResponse, TranslateResponse } from '../services/dutch'
@@ -97,11 +102,12 @@ test('parseIntent: "pendientes" → pending', () => {
   assert.equal(parseIntent('¿cuántas frases me quedan?').type, 'pending')
 })
 
-test('parseIntent: "hola" → start, "ayuda" → help, basura → help', () => {
+test('parseIntent: "hola" → start, "ayuda" → start, basura → chat (cerebro NL)', () => {
   assert.equal(parseIntent('hola').type, 'start')
   assert.equal(parseIntent('inicio').type, 'start')
   assert.equal(parseIntent('ayuda').type, 'start')
-  assert.equal(parseIntent('fjdkalñ').type, 'help')
+  assert.equal(parseIntent('fjdkalñ').type, 'chat')
+  assert.equal(parseIntent('cuéntame algo').type, 'chat')
   assert.equal(parseIntent('').type, 'help')
 })
 
@@ -199,4 +205,108 @@ test('handleSimpleIntent: fallo del servicio → mensaje de error honesto', asyn
   }
   const resp = await handleSimpleIntent({ type: 'translate', text: 'x' }, deps, 1)
   assert.ok(resp.startsWith('🚨'))
+})
+
+// ── Contextos reales para el cerebro NL ─────────────────────────────────────
+
+const CARD_OK: TranslateResponse = {
+  nl: 'Hallo',
+  es: 'Hola',
+  pronunciation: 'já-lo',
+  explanation: 'Saludo informal.',
+  examples: ['Hallo!'],
+  used_llm: true,
+  duplicate: false,
+  card: {
+    id: 1, type: 'phrase', front: 'Hallo', back: 'Hola', nl: 'Hallo', es: 'Hola',
+    pronunciation: 'já-lo', explanation: 'Saludo informal.', grammar: '', examples: '[]',
+    context: '', category: 'general', source: 'manual', created_at: 0, due_at: 0,
+    interval_days: 0, ease: 2.5, repetitions: 0, lapses: 0, status: 'new',
+  },
+}
+
+test('buildTranslateContext: los datos reales de la traducción', () => {
+  const ctx = buildTranslateContext(CARD_OK)
+  assert.ok(ctx.includes('nl: Hallo'))
+  assert.ok(ctx.includes('es: Hola'))
+  assert.ok(ctx.includes('pronunciacion: já-lo'))
+  assert.ok(ctx.includes('explicacion: Saludo informal.'))
+  assert.ok(ctx.includes('Hallo!'))
+  assert.ok(ctx.includes('tarjeta nueva'))
+  assert.ok(buildTranslateContext({ ...CARD_OK, duplicate: true }).includes('ya existía'))
+})
+
+test('buildStatsContext / buildPendingContext: datos reales', () => {
+  const stats: StatsResponse = {
+    total: 30, nuevas: 10, aprendiendo: 5, dominadas: 15, dificiles: 2,
+    pendientes_hoy: 7, racha: 3, aciertos_pct: 80, por_categoria: { general: 30 },
+  }
+  const ctx = buildStatsContext(stats)
+  assert.ok(ctx.includes('total: 30'))
+  assert.ok(ctx.includes('pendientes_hoy: 7'))
+  assert.ok(ctx.includes('aciertos_pct: 80%'))
+  assert.ok(ctx.includes('racha_dias: 3'))
+
+  const due: DueStatusResponse = { pendientes_hoy: 7, nuevas_disponibles: 20, dificiles: 2 }
+  const pctx = buildPendingContext(due)
+  assert.ok(pctx.includes('pendientes_hoy: 7'))
+  assert.ok(pctx.includes('nuevas_disponibles: 20'))
+})
+
+// ── redactOrFallback: LLM si puede, plantilla si no (nunca mudo) ───────────
+
+const brainNl: Brain = async (req) => ({ response: `Respuesta natural: ${req.context}`, brain: 'nl' })
+
+test('redactOrFallback: sin brain → plantilla; brain nl → LLM; fallo/402 → plantilla', async () => {
+  const req = { kind: 'k', userText: 'estadísticas', context: 'total: 30', fallback: 'FB' }
+  assert.equal(await redactOrFallback(undefined, req), 'FB')
+  assert.equal(await redactOrFallback(brainNl, req), 'Respuesta natural: total: 30')
+  assert.equal(
+    await redactOrFallback(async () => ({ response: 'X', brain: 'fallback' as const }), req),
+    'FB'
+  )
+  assert.equal(
+    await redactOrFallback(async () => { throw new Error('HTTP 402') }, req),
+    'FB',
+    'si el LLM falla (402/timeout) → plantilla, nunca mudo'
+  )
+})
+
+test('handleSimpleIntent con brain: stats/pending/translate los redacta el LLM; fallback → plantilla', async () => {
+  const stats: StatsResponse = {
+    total: 30, nuevas: 10, aprendiendo: 5, dominadas: 15, dificiles: 2,
+    pendientes_hoy: 7, racha: 3, aciertos_pct: 80, por_categoria: { general: 30 },
+  }
+  const baseDeps = {
+    translate: async () => CARD_OK,
+    getReviewQueue: async () => [],
+    getCards: async () => [],
+    postReview: async () => ({ ok: true, card: {} as CardDto }),
+    getStats: async () => stats,
+    getDueStatus: async () => ({ pendientes_hoy: 7, nuevas_disponibles: 20, dificiles: 2 }),
+    getStudent: async () => ({ id: 1, nombre: '', nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
+    updateStudent: async () => ({ id: 1, nombre: '', nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
+    getAudio: async () => new Uint8Array(0),
+    sendMessage: async () => ({}),
+  }
+  const depsNl: IntentDeps = { ...baseDeps, brain: brainNl }
+  const depsFb: IntentDeps = { ...baseDeps, brain: async () => ({ response: 'X', brain: 'fallback' as const }) }
+
+  const statsNl = await handleSimpleIntent({ type: 'stats' }, depsNl, 1, 'estadísticas')
+  assert.ok(statsNl.startsWith('Respuesta natural:'), 'el LLM redacta las estadísticas')
+  assert.ok(statsNl.includes('total: 30'), 'con los datos reales')
+  assert.equal(await handleSimpleIntent({ type: 'stats' }, depsFb, 1), formatStats(stats), 'fallback → plantilla exacta')
+
+  const pendingNl = await handleSimpleIntent({ type: 'pending' }, depsNl, 1, 'pendientes')
+  assert.ok(pendingNl.startsWith('Respuesta natural:'))
+  assert.ok(pendingNl.includes('pendientes_hoy: 7'))
+  assert.equal(
+    await handleSimpleIntent({ type: 'pending' }, depsFb, 1),
+    formatPending({ pendientes_hoy: 7, nuevas_disponibles: 20, dificiles: 2 })
+  )
+
+  const trNl = await handleSimpleIntent({ type: 'translate', text: 'hola' }, depsNl, 1, '¿cómo se dice hola?')
+  assert.ok(trNl.startsWith('Respuesta natural:'))
+  assert.ok(trNl.includes('nl: Hallo'))
+  assert.equal(await handleSimpleIntent({ type: 'translate', text: 'hola' }, depsFb, 1), formatCardCreated(CARD_OK))
 })

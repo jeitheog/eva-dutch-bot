@@ -20,6 +20,8 @@ export type Intent =
   | { type: 'pending' }
   | { type: 'start' }
   | { type: 'help' }
+  /** Sin intent determinista: lo resuelve el cerebro de lenguaje natural. */
+  | { type: 'chat' }
 
 export const HELP_TEXT = [
   '🎓 Lingua — tu profesor de holandés. Comandos:',
@@ -102,7 +104,9 @@ export function parseIntent(raw: string): Intent {
   if (/^(hola|inicio|empezar|buenas|hey|ayuda|help|comandos|qu[eé] puedes hacer)\b/.test(lower)) {
     return { type: 'start' }
   }
-  return { type: 'help' }
+  // Sin intent determinista: el poller lo deriva al cerebro de lenguaje
+  // natural (LLM con el rol de Lingua); si el LLM falla, cae a HELP_TEXT.
+  return { type: 'chat' }
 }
 
 // ── Formato de respuestas ──────────────────────────────────────────────────
@@ -263,33 +267,128 @@ export interface IntentDeps {
   /** Audio ogg de pronunciación de la tarjeta (para la nota de voz del front). */
   getAudio(cardId: number): Promise<Uint8Array>
   sendMessage(chatId: number | string, text: string, replyMarkup?: { inline_keyboard: InlineKeyboardButton[][] }): Promise<unknown>
+  /**
+   * Cerebro redactor (opcional): cuando el intent devuelve DATOS (traducción,
+   * estadísticas, pendientes), el bot construye el contexto real y el LLM
+   * redacta la respuesta final en conversación natural. Si no está o falla →
+   * plantilla actual (nunca mudo).
+   */
+  brain?: Brain
+}
+
+// ── Redacción con cerebro NL (contexto real → LLM → conversación natural) ──
+
+/** Petición de redacción: el bot construye el contexto real y el LLM redacta. */
+export interface RedactRequest {
+  /** Qué se responde (traducción / estadísticas / pendientes). */
+  kind: string
+  /** Texto original del usuario (para responderle conversacional). */
+  userText: string
+  /** Datos REALES, en texto estructurado. */
+  context: string
+  /** Plantilla actual: fallback si el LLM falla (nunca mudo). */
+  fallback: string
+}
+
+/** Redactor del cerebro NL inyectable (el poller lo conecta al api_server). */
+export type Brain = (req: RedactRequest) => Promise<{ response: string; brain: 'nl' | 'fallback' }>
+
+/**
+ * Pasa la redacción al cerebro NL; si no hay cerebro o el LLM falla
+ * (402/timeout/red), devuelve la plantilla actual. Nunca lanza, nunca mudo.
+ */
+export async function redactOrFallback(brain: Brain | undefined, req: RedactRequest): Promise<string> {
+  if (!brain) return req.fallback
+  try {
+    const out = await brain(req)
+    if (out.brain === 'nl' && typeof out.response === 'string' && out.response.trim()) {
+      return out.response
+    }
+    return req.fallback
+  } catch (e) {
+    console.error(`intents: cerebro NL no redactó (${(e as Error).message}) — plantilla`)
+    return req.fallback
+  }
+}
+
+// ── Contextos reales para el cerebro NL ────────────────────────────────────
+
+/** Contexto de una traducción/tarjeta (los datos reales de la respuesta). */
+export function buildTranslateContext(t: TranslateResponse): string {
+  const lines = [`nl: ${t.nl}`, `es: ${t.es}`]
+  if (t.pronunciation) lines.push(`pronunciacion: ${t.pronunciation}`)
+  if (t.explanation) lines.push(`explicacion: ${t.explanation}`)
+  if (t.examples && t.examples.length > 0) lines.push(`ejemplos: ${t.examples.slice(0, 3).join(' | ')}`)
+  lines.push(t.duplicate ? '(ya existía en tus tarjetas)' : '(tarjeta nueva añadida a tu colección)')
+  return lines.join('\n')
+}
+
+/** Contexto de las estadísticas de aprendizaje. */
+export function buildStatsContext(s: StatsResponse): string {
+  return [
+    `total: ${s.total}`,
+    `nuevas: ${s.nuevas}`,
+    `aprendiendo: ${s.aprendiendo}`,
+    `dominadas: ${s.dominadas}`,
+    `pendientes_hoy: ${s.pendientes_hoy}`,
+    `dificiles: ${s.dificiles}`,
+    `aciertos_pct: ${s.aciertos_pct}%`,
+    `racha_dias: ${s.racha}`,
+  ].join('\n')
+}
+
+/** Contexto de las pendientes de hoy. */
+export function buildPendingContext(d: DueStatusResponse): string {
+  return [
+    `pendientes_hoy: ${d.pendientes_hoy}`,
+    `nuevas_disponibles: ${d.nuevas_disponibles}`,
+    `dificiles: ${d.dificiles}`,
+  ].join('\n')
 }
 
 /** Respuestas de una sola pasada (translate/stats/pending/start/help). */
 export async function handleSimpleIntent(
   intent: Intent,
   deps: IntentDeps,
-  chatId: number | string
+  chatId: number | string,
+  userText = ''
 ): Promise<string> {
   switch (intent.type) {
     case 'translate': {
       try {
         const t = await deps.translate(intent.text, { addCard: true })
-        return formatCardCreated(t)
+        return redactOrFallback(deps.brain, {
+          kind: 'traducción y tarjeta nueva',
+          userText,
+          context: buildTranslateContext(t),
+          fallback: formatCardCreated(t),
+        })
       } catch (e) {
         return `🚨 No pude traducir: ${(e as Error).message}`
       }
     }
     case 'stats': {
       try {
-        return formatStats(await deps.getStats())
+        const s = await deps.getStats()
+        return redactOrFallback(deps.brain, {
+          kind: 'estadísticas de aprendizaje',
+          userText,
+          context: buildStatsContext(s),
+          fallback: formatStats(s),
+        })
       } catch (e) {
         return `🚨 No pude consultar las estadísticas: ${(e as Error).message}`
       }
     }
     case 'pending': {
       try {
-        return formatPending(await deps.getDueStatus())
+        const d = await deps.getDueStatus()
+        return redactOrFallback(deps.brain, {
+          kind: 'frases pendientes para hoy',
+          userText,
+          context: buildPendingContext(d),
+          fallback: formatPending(d),
+        })
       } catch (e) {
         return `🚨 No pude consultar las pendientes: ${(e as Error).message}`
       }
@@ -300,6 +399,10 @@ export async function handleSimpleIntent(
       return HELP_TEXT
     case 'review':
       // El flujo de repaso lo orquesta el poller (sesión multi-mensaje).
+      return ''
+    case 'chat':
+      // El poller lo resuelve con el cerebro de lenguaje natural antes de
+      // llegar aquí; este caso es solo una red de seguridad.
       return ''
   }
 }

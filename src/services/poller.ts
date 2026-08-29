@@ -32,10 +32,12 @@ import {
   CONTINUE_RE,
   STOP_RE,
   INTRO_TEXT,
+  HELP_TEXT,
   PHRASE_POOL,
   type IntentDeps,
 } from './intents'
 import { createDutchClient, type CardDto, type DutchServiceClient } from './dutch'
+import { nlBrainOrFallback } from './nl-brain'
 import {
   advance,
   currentCard,
@@ -43,6 +45,29 @@ import {
   newReviewSession,
   setSession,
 } from './session'
+import type { Brain } from './intents'
+
+/**
+ * Cerebro redactor de Lingua: cuando el intent devuelve DATOS (traducción,
+ * estadísticas, pendientes), el bot construye el contexto real y el LLM
+ * redacta la respuesta final en conversación natural, como Hermes. Si el LLM
+ * falla (402/timeout) → fallback a la plantilla actual (nunca mudo). El flujo
+ * interactivo de repaso (botones, calificación, sesiones) NO pasa por aquí.
+ */
+export function buildBrain(): Brain {
+  return async (req) => {
+    const system = [
+      config.botRole,
+      'Ahora redacta la RESPUESTA FINAL que Lingua envía al usuario por Telegram.',
+      'Escríbela en conversación natural, como Hermes: clara, cercana, breve, con emojis y con los datos reales del contexto.',
+      'Usa SOLO los datos del contexto: nunca inventes traducciones, cifras ni progresos que no estén ahí.',
+      'No enumeres comandos ni ofrezcas listas de opciones salvo que el usuario los pida explícitamente.',
+      'Responde solo con el texto final del mensaje, sin preámbulos ni explicaciones de tu proceso.',
+    ].join('\n')
+    const user = `Petición del usuario: «${req.userText || req.kind}»\n\nDatos reales (${req.kind}):\n${req.context}`
+    return nlBrainOrFallback(user, system, req.fallback, 45_000)
+  }
+}
 
 export interface PollerState {
   polling: boolean
@@ -123,6 +148,9 @@ export function buildIntentDeps(client: TelegramClient): IntentDeps {
     updateStudent: (patch) => dutch.updateStudent(patch),
     getAudio: (cardId) => dutch.getAudio(cardId),
     sendMessage: (id, t, markup) => client.sendMessage(id, t, markup),
+    // Los intents con DATOS (traducción/estadísticas/pendientes) los redacta
+    // el LLM en conversación natural; fallback → plantilla actual.
+    brain: buildBrain(),
   }
 }
 
@@ -439,10 +467,22 @@ export async function handleUpdate(
   } else if (intent.type === 'start') {
     // Saludo breve y amable: SIN entrevista ni preguntas progresivas.
     await client.sendMessage(chatId, INTRO_TEXT)
+  } else if (intent.type === 'chat') {
+    // Cerebro de lenguaje natural: sin intent determinista → el LLM responde
+    // con el rol de Lingua (fail-closed). Si el LLM falla → ayuda actual.
+    const nl = await nlBrainOrFallback(text, config.botRole, HELP_TEXT)
+    if (nl.response) {
+      try {
+        await client.sendMessage(chatId, nl.response)
+      } catch (e) {
+        pollerState.last_error = `sendMessage: ${(e as Error).message}`
+      }
+    }
+    console.log(`dutch-poller: cerebro NL (${nl.brain}) para: ${text.slice(0, 80)}`)
   } else {
     let response: string
     try {
-      response = await handleSimpleIntent(intent, deps, chatId)
+      response = await handleSimpleIntent(intent, deps, chatId, text)
     } catch (e) {
       pollerState.last_error = `intent: ${(e as Error).message}`
       response = '🚨 No pude procesar tu petición. Inténtalo en un momento.'
