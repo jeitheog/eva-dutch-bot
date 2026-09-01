@@ -7,6 +7,7 @@ import assert from 'node:assert/strict'
 import {
   evaluateAnswer,
   formatCardCreated,
+  formatLanguageSwitch,
   formatPending,
   formatStats,
   handleSimpleIntent,
@@ -21,6 +22,7 @@ import {
   INTRO_TEXT,
   CLARIFICATION_TEXT,
   PHRASE_POOL,
+  EN_PHRASE_POOL,
   type Brain,
   type IntentDeps,
 } from '../services/intents'
@@ -92,6 +94,48 @@ test('PHRASE_POOL: frases básicas en neerlandés para el repaso infinito', () =
   assert.ok(PHRASE_POOL.includes('dank je wel'))
 })
 
+test('EN_PHRASE_POOL: frases básicas en inglés para el repaso infinito en inglés', () => {
+  assert.ok(EN_PHRASE_POOL.length >= 10, 'el pool de inglés tiene frases de sobra')
+  assert.ok(EN_PHRASE_POOL.every((p) => p.trim().length > 0))
+  assert.ok(EN_PHRASE_POOL.includes('good morning'))
+})
+
+// ── Cambio de idioma activo (inglés/holandés) ──────────────────────────────
+
+test('parseIntent: "inglés" / "estudiar inglés" / "cambiar a inglés" → language en', () => {
+  assert.deepEqual(parseIntent('inglés'), { type: 'language', language: 'en' })
+  assert.deepEqual(parseIntent('estudiar inglés'), { type: 'language', language: 'en' })
+  assert.deepEqual(parseIntent('cambiar a inglés'), { type: 'language', language: 'en' })
+  assert.deepEqual(parseIntent('quiero estudiar inglés'), { type: 'language', language: 'en' })
+  assert.deepEqual(parseIntent('vamos a practicar inglés'), { type: 'language', language: 'en' })
+  assert.deepEqual(parseIntent('aprender inglés'), { type: 'language', language: 'en' })
+})
+
+test('parseIntent: "holandés" / "cambiar a holandés" → language nl', () => {
+  assert.deepEqual(parseIntent('holandés'), { type: 'language', language: 'nl' })
+  assert.deepEqual(parseIntent('cambiar a holandés'), { type: 'language', language: 'nl' })
+  assert.deepEqual(parseIntent('estudiar holandés'), { type: 'language', language: 'nl' })
+})
+
+test('parseIntent: el idioma no roba intents de traducción ni de repaso', () => {
+  // "¿cómo se dice inglés?" sigue traduciendo la palabra.
+  const t = parseIntent('¿cómo se dice inglés?')
+  assert.equal(t.type, 'translate')
+  assert.equal((t as { text: string }).text, 'inglés')
+  // "aprender esta frase: X" sigue traduciendo X.
+  assert.deepEqual(parseIntent('aprender esta frase: good morning'), { type: 'translate', text: 'good morning' })
+  assert.equal(parseIntent('repaso').type, 'review')
+  assert.equal(parseIntent('vamos a practicar').type, 'review')
+  assert.equal(parseIntent('cuéntame algo').type, 'chat')
+})
+
+test('formatLanguageSwitch: confirmaciones de idioma', () => {
+  assert.ok(formatLanguageSwitch('en').includes('A estudiar inglés'))
+  assert.ok(formatLanguageSwitch('en').includes('🇬🇧'))
+  assert.ok(formatLanguageSwitch('nl').includes('A estudiar holandés'))
+  assert.ok(formatLanguageSwitch('nl').includes('🇳🇱'))
+})
+
 test('parseIntent: "estadísticas" / "estadisticas" → stats', () => {
   assert.equal(parseIntent('estadísticas').type, 'stats')
   assert.equal(parseIntent('estadisticas').type, 'stats')
@@ -139,7 +183,7 @@ test('formatCardCreated: tarjeta creada vs duplicado', () => {
     used_llm: true,
     duplicate: false,
     card: {
-      id: 1, type: 'phrase', front: 'Hallo', back: 'Hola', nl: 'Hallo', es: 'Hola',
+      id: 1, type: 'phrase', language: 'nl', front: 'Hallo', back: 'Hola', nl: 'Hallo', es: 'Hola',
       pronunciation: 'já-lo', explanation: 'Saludo informal.', grammar: '', examples: '[]',
       context: '', category: 'general', source: 'manual', created_at: 0, due_at: 0,
       interval_days: 0, ease: 2.5, repetitions: 0, lapses: 0, status: 'new',
@@ -175,7 +219,7 @@ test('handleSimpleIntent: translate con deps mock → formato de tarjeta', async
       nl: 'Dank je wel', es: 'Muchas gracias', pronunciation: '', explanation: '',
       examples: [], used_llm: true, duplicate: false,
       card: {
-        id: 2, type: 'phrase', front: 'Dank je wel', back: 'Muchas gracias', nl: 'Dank je wel', es: 'Muchas gracias',
+        id: 2, type: 'phrase', language: 'nl', front: 'Dank je wel', back: 'Muchas gracias', nl: 'Dank je wel', es: 'Muchas gracias',
         pronunciation: '', explanation: '', grammar: '', examples: '[]', context: '',
         category: 'general', source: 'manual', created_at: 0, due_at: 0,
         interval_days: 0, ease: 2.5, repetitions: 0, lapses: 0, status: 'new',
@@ -190,6 +234,7 @@ test('handleSimpleIntent: translate con deps mock → formato de tarjeta', async
     updateStudent: async (p) => ({ id: 1, nombre: String(p.nombre ?? ''), nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
     getAudio: async () => new Uint8Array(0),
     sendMessage: async () => ({}),
+    setLanguage: () => {},
   }
   const resp = await handleSimpleIntent({ type: 'translate', text: 'dank je wel' }, deps, 7026212206)
   assert.ok(resp.includes('Dank je wel'))
@@ -210,6 +255,7 @@ test('handleSimpleIntent: fallo del servicio → mensaje de error honesto', asyn
     updateStudent: async (p) => ({ id: 1, nombre: String(p.nombre ?? ''), nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
     getAudio: async () => new Uint8Array(0),
     sendMessage: async () => ({}),
+    setLanguage: () => {},
   }
   const resp = await handleSimpleIntent({ type: 'translate', text: 'x' }, deps, 1)
   assert.ok(resp.startsWith('🚨'))
@@ -226,7 +272,7 @@ const CARD_OK: TranslateResponse = {
   used_llm: true,
   duplicate: false,
   card: {
-    id: 1, type: 'phrase', front: 'Hallo', back: 'Hola', nl: 'Hallo', es: 'Hola',
+    id: 1, type: 'phrase', language: 'nl', front: 'Hallo', back: 'Hola', nl: 'Hallo', es: 'Hola',
     pronunciation: 'já-lo', explanation: 'Saludo informal.', grammar: '', examples: '[]',
     context: '', category: 'general', source: 'manual', created_at: 0, due_at: 0,
     interval_days: 0, ease: 2.5, repetitions: 0, lapses: 0, status: 'new',
@@ -296,6 +342,7 @@ test('handleSimpleIntent con brain: stats/pending/translate los redacta el LLM; 
     updateStudent: async () => ({ id: 1, nombre: '', nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
     getAudio: async () => new Uint8Array(0),
     sendMessage: async () => ({}),
+    setLanguage: () => {},
   }
   const depsNl: IntentDeps = { ...baseDeps, brain: brainNl }
   const depsFb: IntentDeps = { ...baseDeps, brain: async () => ({ response: 'X', brain: 'fallback' as const }) }
@@ -317,4 +364,70 @@ test('handleSimpleIntent con brain: stats/pending/translate los redacta el LLM; 
   assert.ok(trNl.startsWith('Respuesta natural:'))
   assert.ok(trNl.includes('nl: Hallo'))
   assert.equal(await handleSimpleIntent({ type: 'translate', text: 'hola' }, depsFb, 1), formatCardCreated(CARD_OK))
+})
+
+// ── Cambio de idioma: handleSimpleIntent language ──────────────────────────
+
+test('handleSimpleIntent: language en → setLanguage(chatId, en) + confirmación', async () => {
+  let setLangChat: number | string | undefined
+  let setLangValue: 'nl' | 'en' | undefined
+  const deps: IntentDeps = {
+    translate: async () => CARD_OK,
+    getReviewQueue: async () => [],
+    getCards: async () => [],
+    postReview: async () => ({ ok: true, card: {} as CardDto }),
+    getStats: async () => ({ total: 0, nuevas: 0, aprendiendo: 0, dominadas: 0, dificiles: 0, pendientes_hoy: 0, racha: 0, aciertos_pct: 0, por_categoria: {} }),
+    getDueStatus: async () => ({ pendientes_hoy: 0, nuevas_disponibles: 20, dificiles: 0 }),
+    getStudent: async () => ({ id: 1, nombre: '', nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
+    updateStudent: async () => ({ id: 1, nombre: '', nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
+    getAudio: async () => new Uint8Array(0),
+    sendMessage: async () => ({}),
+    setLanguage: (chatId, lang) => {
+      setLangChat = chatId
+      setLangValue = lang
+    },
+  }
+  const resp = await handleSimpleIntent({ type: 'language', language: 'en' }, deps, 7026212206)
+  assert.equal(setLangChat, 7026212206)
+  assert.equal(setLangValue, 'en')
+  assert.ok(resp.includes('A estudiar inglés'))
+  assert.ok(resp.includes('repaso'))
+
+  const respNl = await handleSimpleIntent({ type: 'language', language: 'nl' }, deps, 7026212206)
+  assert.equal(setLangValue, 'nl')
+  assert.ok(respNl.includes('A estudiar holandés'))
+})
+
+// ── Tarjeta en inglés: formato y contexto ──────────────────────────────────
+
+const CARD_EN: TranslateResponse = {
+  language: 'en',
+  nl: '',
+  en: 'Good morning',
+  es: 'Buenos días',
+  pronunciation: 'gud mó-rning',
+  explanation: 'Saludo de mañana.',
+  examples: ['Good morning, how are you?'],
+  used_llm: true,
+  duplicate: false,
+  card: {
+    id: 5, type: 'phrase', language: 'en', front: 'Good morning', back: 'Buenos días', nl: '', es: 'Buenos días',
+    pronunciation: 'gud mó-rning', explanation: 'Saludo de mañana.', grammar: '', examples: '[]',
+    context: '', category: 'general', source: 'manual', created_at: 0, due_at: 0,
+    interval_days: 0, ease: 2.5, repetitions: 0, lapses: 0, status: 'new',
+  },
+}
+
+test('formatCardCreated con tarjeta en inglés: muestra el front en inglés y la traducción', () => {
+  const msg = formatCardCreated(CARD_EN)
+  assert.ok(msg.includes('Good morning'), 'front en inglés')
+  assert.ok(msg.includes('Buenos días'), 'traducción al español')
+  assert.ok(msg.includes('gud mó-rning'), 'pronunciación')
+})
+
+test('buildTranslateContext con idioma en: "en: <texto>"', () => {
+  const ctx = buildTranslateContext(CARD_EN)
+  assert.ok(ctx.includes('en: Good morning'))
+  assert.ok(ctx.includes('es: Buenos días'))
+  assert.ok(!ctx.includes('nl: '), 'no etiqueta el texto como nl')
 })

@@ -5,6 +5,7 @@ import { startPoller } from './services/poller'
 import { startReminder } from './services/reminder'
 import { createTelegramClient } from './services/telegram'
 import { createDutchClient } from './services/dutch'
+import { getUserLanguage } from './services/user-language'
 
 const app = express()
 app.use(express.json({ limit: '1mb' }))
@@ -22,7 +23,8 @@ app.listen(config.port, '127.0.0.1', () => {
   startPoller().catch((e) => console.error(`dutch-poller: ${(e as Error).message}`))
   const dutchClient = createDutchClient()
   startReminder({
-    getDueStatus: () => dutchClient.getDueStatus(),
+    // El recordatorio sigue el idioma activo de Jei (holandés por defecto).
+    getDueStatus: () => dutchClient.getDueStatus(getUserLanguage(config.reminderChatId)),
     sendMessage: (chatId, text) => telegramClient.sendMessage(chatId, text),
   })
 })

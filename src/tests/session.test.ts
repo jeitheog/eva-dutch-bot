@@ -19,7 +19,7 @@ import type { CardDto } from '../services/dutch'
 
 function makeCard(id: number, front: string, back: string): CardDto {
   return {
-    id, type: 'phrase', front, back, nl: front, es: back, pronunciation: '', explanation: '',
+    id, type: 'phrase', language: 'nl', front, back, nl: front, es: back, pronunciation: '', explanation: '',
     grammar: '', examples: '[]', context: '', category: 'general', source: 'manual',
     created_at: 0, due_at: 0, interval_days: 0, ease: 2.5, repetitions: 0, lapses: 0, status: 'new',
   }

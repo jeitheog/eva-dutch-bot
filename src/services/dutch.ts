@@ -8,6 +8,8 @@ import { config } from '../config'
 export interface CardDto {
   id: number
   type: 'phrase' | 'word'
+  /** Idioma objetivo: 'nl' | 'en'. */
+  language: string
   front: string
   back: string
   nl: string
@@ -29,7 +31,11 @@ export interface CardDto {
 }
 
 export interface TranslateResponse {
+  /** Idioma objetivo: 'nl' | 'en'. */
+  language?: 'nl' | 'en'
   nl: string
+  /** Texto en inglés (presente cuando language='en'). */
+  en?: string
   es: string
   pronunciation: string
   explanation: string
@@ -72,16 +78,16 @@ export interface StudentResponse {
 }
 
 export interface DutchServiceClient {
-  translate(text: string, opts?: { addCard?: boolean; type?: string; category?: string }): Promise<TranslateResponse>
-  getReviewQueue(limit?: number): Promise<CardDto[]>
+  translate(text: string, opts?: { addCard?: boolean; type?: string; category?: string; language?: 'nl' | 'en' }): Promise<TranslateResponse>
+  getReviewQueue(limit?: number, language?: 'nl' | 'en'): Promise<CardDto[]>
   /** Tarjetas por status ('new' | 'learning' | 'review' | 'mastered' | undefined = todas), orden created_at DESC. */
-  getCards(status?: string, limit?: number): Promise<CardDto[]>
+  getCards(status?: string, limit?: number, language?: 'nl' | 'en'): Promise<CardDto[]>
   postReview(cardId: number, grade: number, latencyMs: number): Promise<{ ok: boolean; card: CardDto }>
-  getStats(): Promise<StatsResponse>
-  getDueStatus(): Promise<DueStatusResponse>
+  getStats(language?: 'nl' | 'en'): Promise<StatsResponse>
+  getDueStatus(language?: 'nl' | 'en'): Promise<DueStatusResponse>
   getStudent(): Promise<StudentResponse>
   updateStudent(patch: Record<string, unknown>): Promise<StudentResponse>
-  /** Audio ogg de pronunciación de una tarjeta (generado bajo demanda por el service). */
+  /** Audio ogg de pronunciación de una tarjeta (generado bajo demanda por el service, con la voz del idioma de la tarjeta). */
   getAudio(cardId: number): Promise<Uint8Array>
   health(): Promise<{ ok: boolean }>
 }
@@ -112,21 +118,24 @@ export function createDutchClient(opts: { baseUrl?: string; apiKey?: string; fet
       call<TranslateResponse>('POST', '/api/v1/dutch/translate', {
         text,
         direction: 'auto',
+        language: opts.language ?? 'nl',
         add_card: opts.addCard ?? false,
         type: opts.type,
         category: opts.category,
       }),
-    getReviewQueue: (limit = 10) => call<{ cards: CardDto[] }>('GET', `/api/v1/dutch/review/queue?limit=${limit}`).then((r) => r.cards),
-    getCards: (status, limit = 100) => {
+    getReviewQueue: (limit = 10, language = 'nl') =>
+      call<{ cards: CardDto[] }>('GET', `/api/v1/dutch/review/queue?limit=${limit}&language=${language}`).then((r) => r.cards),
+    getCards: (status, limit = 100, language = 'nl') => {
       const qs = new URLSearchParams()
       if (status) qs.set('status', status)
       qs.set('limit', String(limit))
+      qs.set('language', language)
       return call<{ cards: CardDto[] }>('GET', `/api/v1/dutch/cards?${qs.toString()}`).then((r) => r.cards)
     },
     postReview: (cardId, grade, latencyMs) =>
       call<{ ok: boolean; card: CardDto }>('POST', '/api/v1/dutch/review', { card_id: cardId, grade, latency_ms: latencyMs }),
-    getStats: () => call<StatsResponse>('GET', '/api/v1/dutch/stats'),
-    getDueStatus: () => call<DueStatusResponse>('GET', '/api/v1/dutch/due/status'),
+    getStats: (language = 'nl') => call<StatsResponse>('GET', `/api/v1/dutch/stats?language=${language}`),
+    getDueStatus: (language = 'nl') => call<DueStatusResponse>('GET', `/api/v1/dutch/due/status?language=${language}`),
     getStudent: () => call<StudentResponse>('GET', '/api/v1/dutch/student'),
     updateStudent: (patch) => call<StudentResponse>('POST', '/api/v1/dutch/student', patch),
     getAudio: async (cardId) => {

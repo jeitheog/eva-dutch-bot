@@ -6,8 +6,12 @@
 
 import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { handleUpdate, shouldProcess } from '../services/poller'
 import { sessions, setSession } from '../services/session'
+import { setUserLanguage, setLanguageStoreFileForTests, getUserLanguage } from '../services/user-language'
 import type { CardDto } from '../services/dutch'
 import type { TelegramClient, TelegramUpdate } from '../services/telegram'
 import type { IntentDeps } from '../services/intents'
@@ -16,9 +20,9 @@ const JEI = 7026212206
 const JESSI = 7181079278
 const INTRUSO = 123456789
 
-function makeCard(id: number, front: string, back: string): CardDto {
+function makeCard(id: number, front: string, back: string, language = 'nl'): CardDto {
   return {
-    id, type: 'phrase', front, back, nl: front, es: back,
+    id, type: 'phrase', language, front, back, nl: language === 'en' ? '' : front, es: back,
     pronunciation: 'pron', explanation: 'explicación gramatical',
     grammar: '', examples: JSON.stringify(['Ejemplo 1 — Ejemplo 1 ES']),
     context: '', category: 'general', source: 'manual',
@@ -73,6 +77,7 @@ function makeFakeDeps(queue: CardDto[], onReview?: (cardId: number, grade: numbe
     updateStudent: async () => ({ id: 1, nombre: '', nivel: 'beginner', profesion: '', hobbies: '[]', objetivos: '', situaciones: '[]', dificultades: '[]', preferencia_metodo: '', updated_at: 0 }),
     getAudio: async () => new Uint8Array([1, 2, 3]),
     sendMessage: async () => ({}),
+    setLanguage: () => {},
   }
   return { deps, reviews }
 }
@@ -96,7 +101,11 @@ function messageUpdate(chatId: number, userId: number, text: string): TelegramUp
   }
 }
 
-beforeEach(() => sessions.clear())
+beforeEach(() => {
+  sessions.clear()
+  // Aislamiento del idioma activo: cada test usa su propio archivo temporal.
+  setLanguageStoreFileForTests(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lingua-lang-test-')), 'user_language.json'))
+})
 
 test('allowlist: Jei y Jessi autorizados; cualquier otro → ignore', () => {
   assert.equal(shouldProcess({ type: 'private', id: 1 }, JEI), 'process')
@@ -308,4 +317,62 @@ test('"para"/"basta"/"stop"/"termina" terminan la sesión con el resumen', async
   assert.ok((summary!.args[1] as string).includes('1 bien'))
   assert.equal(reviews.length, 1, 'no se calificó la tarjeta 2')
   assert.equal(sessions.size, 0, 'sesión cerrada')
+})
+
+// ── Cambio de idioma activo (end-to-end con el store real) ─────────────────
+
+test('"inglés" cambia el idioma y el repaso posterior usa la cola en inglés (en→es)', async () => {
+  // La factory replica buildIntentDeps: captura el idioma del store por chat.
+  const seen: string[] = []
+  const nlCard = makeCard(1, 'Goedemorgen', 'Buenos días', 'nl')
+  const enCard = makeCard(2, 'Good morning', 'Buenos días', 'en')
+  const { client, calls } = makeFakeClient()
+  const factory = (_c: TelegramClient, chatId?: number) => {
+    const language = getUserLanguage(chatId ?? JEI)
+    return {
+      ...makeFakeDeps([]).deps,
+      setLanguage: (id: number | string, lang: 'nl' | 'en') => {
+        seen.push(`setLanguage:${id}:${lang}`)
+        setUserLanguage(id, lang)
+      },
+      getReviewQueue: async (limit?: number) => {
+        seen.push(`queue:${language}:${limit ?? 'default'}`)
+        return language === 'en' ? [enCard] : [nlCard]
+      },
+    }
+  }
+
+  // 1) Default: holandés. "repaso" → cola nl.
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'repaso'), factory)
+  assert.ok(seen.includes('queue:nl:10'), 'el repaso por defecto va en holandés')
+  assert.equal(getUserLanguage(JEI), 'nl', 'default nl (no rompe nada)')
+  // Cerramos la sesión de repaso para poder cambiar de idioma.
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'para'), factory)
+  assert.equal(sessions.size, 0)
+
+  // 2) "inglés" → confirmación + persistido 'en'.
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'inglés'), factory)
+  assert.ok(seen.includes('setLanguage:7026212206:en'), 'setLanguage con en')
+  const conf = calls.filter((c) => c.method === 'sendMessage').pop()!
+  assert.ok((conf.args[1] as string).includes('A estudiar inglés'), 'confirmación de cambio a inglés')
+  assert.equal(getUserLanguage(JEI), 'en', 'idioma persistido')
+
+  // 3) "repaso" (nueva factory, idioma en) → cola en inglés.
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'repaso'), factory)
+  assert.ok(seen.includes('queue:en:10'), 'el repaso en inglés usa la cola en')
+  const front = calls.filter((c) => c.method === 'sendMessage').pop()!
+  assert.equal(front.args[1], '🎴 Good morning', 'muestra la tarjeta en inglés')
+  // Cerramos la sesión de inglés antes de volver a cambiar de idioma.
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'para'), factory)
+  assert.equal(sessions.size, 0)
+
+  // 4) "cambiar a holandés" → vuelve a nl.
+  await handleUpdate(client, messageUpdate(JEI, JEI, 'cambiar a holandés'), factory)
+  assert.equal(getUserLanguage(JEI), 'nl')
+})
+
+test('el idioma es por usuario: Jessi sigue en nl aunque Jei esté en en', async () => {
+  setUserLanguage(JEI, 'en')
+  assert.equal(getUserLanguage(JEI), 'en')
+  assert.equal(getUserLanguage(JESSI), 'nl', 'Jessi no hereda el idioma de Jei')
 })

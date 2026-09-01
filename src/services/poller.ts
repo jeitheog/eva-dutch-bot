@@ -34,6 +34,7 @@ import {
   INTRO_TEXT,
   CLARIFICATION_TEXT,
   PHRASE_POOL,
+  EN_PHRASE_POOL,
   type IntentDeps,
 } from './intents'
 import { createDutchClient, type CardDto, type DutchServiceClient } from './dutch'
@@ -45,7 +46,13 @@ import {
   newReviewSession,
   setSession,
 } from './session'
+import { getUserLanguage, setUserLanguage, type Language } from './user-language'
 import type { Brain } from './intents'
+
+/** Nombre legible del idioma activo para el cerebro NL. */
+export function languageName(language: Language): string {
+  return language === 'en' ? 'inglés' : 'holandés'
+}
 
 /**
  * Cerebro redactor de Lingua: cuando el intent devuelve DATOS (traducción,
@@ -53,11 +60,14 @@ import type { Brain } from './intents'
  * redacta la respuesta final en conversación natural, como Hermes. Si el LLM
  * falla (402/timeout) → fallback a la plantilla actual (nunca mudo). El flujo
  * interactivo de repaso (botones, calificación, sesiones) NO pasa por aquí.
+ * El idioma activo del usuario se menciona para que la redacción respete el
+ * idioma que se está estudiando.
  */
-export function buildBrain(): Brain {
+export function buildBrain(language: Language): Brain {
   return async (req) => {
     const system = [
       config.botRole,
+      `El usuario está estudiando ${languageName(language).toUpperCase()} ahora mismo: las traducciones y los ejemplos van en ${languageName(language)}.`,
       'Ahora redacta la RESPUESTA FINAL que Lingua envía al usuario por Telegram.',
       'Escríbela en conversación natural, como Hermes: clara, cercana, breve, con emojis y con los datos reales del contexto.',
       'Usa SOLO los datos del contexto: nunca inventes traducciones, cifras ni progresos que no estén ahí.',
@@ -136,22 +146,29 @@ export function saveOffset(offset: number): void {
 
 // ── Dependencias reales (eva-dutch-service) ────────────────────────────────
 
-export function buildIntentDeps(client: TelegramClient): IntentDeps {
+/**
+ * Dependencias con el idioma activo del usuario ya capturado: todas las
+ * llamadas al servicio (translate/queue/cards/stats/due) van con ese idioma.
+ * chatId es opcional (los tests inyectan deps sin chat).
+ */
+export function buildIntentDeps(client: TelegramClient, chatId?: number): IntentDeps {
   const dutch: DutchServiceClient = createDutchClient()
+  const language: Language = chatId === undefined ? 'nl' : getUserLanguage(chatId)
   return {
-    translate: (text, opts) => dutch.translate(text, { addCard: opts?.addCard ?? false }),
-    getReviewQueue: (limit) => dutch.getReviewQueue(limit),
-    getCards: (status, limit) => dutch.getCards(status, limit),
+    translate: (text, opts) => dutch.translate(text, { addCard: opts?.addCard ?? false, language }),
+    getReviewQueue: (limit) => dutch.getReviewQueue(limit, language),
+    getCards: (status, limit) => dutch.getCards(status, limit, language),
     postReview: (cardId, grade, latencyMs) => dutch.postReview(cardId, grade, latencyMs),
-    getStats: () => dutch.getStats(),
-    getDueStatus: () => dutch.getDueStatus(),
+    getStats: () => dutch.getStats(language),
+    getDueStatus: () => dutch.getDueStatus(language),
     getStudent: () => dutch.getStudent(),
     updateStudent: (patch) => dutch.updateStudent(patch),
     getAudio: (cardId) => dutch.getAudio(cardId),
     sendMessage: (id, t, markup) => client.sendMessage(id, t, markup),
+    setLanguage: (id, lang) => setUserLanguage(id, lang),
     // Los intents con DATOS (traducción/estadísticas/pendientes) los redacta
     // el LLM en conversación natural; fallback → plantilla actual.
-    brain: buildBrain(),
+    brain: buildBrain(language),
   }
 }
 
@@ -243,14 +260,16 @@ function shuffle<T>(arr: T[]): T[] {
 }
 
 /**
- * Genera una tarjeta nueva con una frase del pool básico (vía translate con
- * add_card; el service deduplica: si la frase ya existe devuelve la tarjeta
- * existente). Prefiere frases aún no vistas en la sesión; si todas están
- * vistas, cicla por la primera que funcione — nunca se queda mudo.
+ * Genera una tarjeta nueva con una frase del pool básico del idioma activo
+ * (vía translate con add_card; el service deduplica: si la frase ya existe
+ * devuelve la tarjeta existente). Prefiere frases aún no vistas en la sesión;
+ * si todas están vistas, cicla por la primera que funcione — nunca se queda
+ * mudo.
  */
-async function generateFreshCard(deps: IntentDeps, seen: number[]): Promise<CardDto | null> {
+async function generateFreshCard(deps: IntentDeps, seen: number[], language: Language): Promise<CardDto | null> {
+  const pool = language === 'en' ? EN_PHRASE_POOL : PHRASE_POOL
   let fallback: CardDto | null = null
-  for (const phrase of PHRASE_POOL) {
+  for (const phrase of pool) {
     try {
       const t = await deps.translate(phrase, { addCard: true })
       if (!t.card) continue
@@ -264,13 +283,13 @@ async function generateFreshCard(deps: IntentDeps, seen: number[]): Promise<Card
 }
 
 /**
- * Carga la siguiente tanda de tarjetas para la sesión de repaso. El repaso
- * NUNCA se queda sin material: primero las vencidas, y si no quedan, continúa
- * con tarjetas nuevas → difíciles → aleatorias → y si la BD está vacía,
- * genera una frase nueva (LLM/pool). Devuelve [] solo si absolutamente nada
- * está disponible.
+ * Carga la siguiente tanda de tarjetas para la sesión de repaso DEL IDIOMA
+ * ACTIVO. El repaso NUNCA se queda sin material: primero las vencidas, y si
+ * no quedan, continúa con tarjetas nuevas → difíciles → aleatorias → y si la
+ * BD está vacía, genera una frase nueva (LLM/pool). Devuelve [] solo si
+ * absolutamente nada está disponible.
  */
-async function loadMoreCards(deps: IntentDeps, seen: number[]): Promise<CardDto[]> {
+async function loadMoreCards(deps: IntentDeps, seen: number[], language: Language): Promise<CardDto[]> {
   const unseen = (cards: CardDto[]) => cards.filter((c) => !seen.includes(c.id))
 
   // 1) Vencidas (cola normal del SRS).
@@ -297,7 +316,7 @@ async function loadMoreCards(deps: IntentDeps, seen: number[]): Promise<CardDto[
   if (all.length > 0) return shuffle(all).slice(0, 10)
 
   // 5) Sin nada en la BD → generar una frase nueva (LLM o pool).
-  const generated = await generateFreshCard(deps, seen)
+  const generated = await generateFreshCard(deps, seen, language)
   return generated ? [generated] : []
 }
 
@@ -312,7 +331,7 @@ async function refillSession(client: TelegramClient, chatId: number, deps: Inten
   const session = getSession(chatId)
   if (!session || session.mode !== 'review') return
   try {
-    const more = await loadMoreCards(deps, session.seen)
+    const more = await loadMoreCards(deps, session.seen, getUserLanguage(chatId))
     if (more.length > 0) {
       setSession(chatId, { ...session, queue: more, idx: 0 })
       await showCard(client, chatId, deps)
@@ -392,7 +411,7 @@ async function handleReviewAnswer(client: TelegramClient, chatId: number, text: 
 export async function handleUpdate(
   client: TelegramClient,
   update: TelegramUpdate,
-  depsFactory: (client: TelegramClient) => IntentDeps = buildIntentDeps
+  depsFactory: (client: TelegramClient, chatId?: number) => IntentDeps = buildIntentDeps
 ): Promise<void> {
   const message = update.message
   const callback = update.callback_query
@@ -412,7 +431,7 @@ export async function handleUpdate(
     }
     const gradeMatch = /^grade([0-5])$/.exec(data)
     if (gradeMatch) {
-      await gradeCurrentCard(client, chatId, Number(gradeMatch[1]), depsFactory(client))
+      await gradeCurrentCard(client, chatId, Number(gradeMatch[1]), depsFactory(client, chatId))
     }
     return
   }
@@ -422,7 +441,7 @@ export async function handleUpdate(
 
   const chatId = message.chat.id
   const text = (message.text ?? message.caption ?? '').trim()
-  const deps = depsFactory(client)
+  const deps = depsFactory(client, chatId)
 
   // Sesión activa de repaso: comandos de control (sigue/para) o respuesta libre.
   const session = getSession(chatId)
@@ -450,8 +469,8 @@ export async function handleUpdate(
     try {
       // El repaso no termina por falta de material: si no hay vencidas, se
       // continúa con nuevas/difíciles/aleatorias y, si la BD está vacía, se
-      // genera una frase nueva (LLM/pool).
-      const cards = await loadMoreCards(deps, [])
+      // genera una frase nueva (LLM/pool). Todo en el idioma activo.
+      const cards = await loadMoreCards(deps, [], getUserLanguage(chatId))
       if (cards.length === 0) {
         await client.sendMessage(
           chatId,
@@ -470,9 +489,15 @@ export async function handleUpdate(
     await client.sendMessage(chatId, INTRO_TEXT)
   } else if (intent.type === 'chat') {
     // Cerebro de lenguaje natural: sin intent determinista → el LLM responde
-    // con el rol de Lingua (fail-closed). Si el LLM falla → pregunta breve y
-    // amable en lenguaje natural (NUNCA el menú de comandos).
-    const nl = await nlBrainOrFallback(text, config.botRole, CLARIFICATION_TEXT)
+    // con el rol de Lingua (fail-closed), MENCIONANDO el idioma activo del
+    // usuario. Si el LLM falla → pregunta breve y amable en lenguaje natural
+    // (NUNCA el menú de comandos).
+    const language = getUserLanguage(chatId)
+    const system = [
+      config.botRole,
+      `El usuario está estudiando ${languageName(language).toUpperCase()} ahora mismo: las traducciones y los ejemplos van en ${languageName(language)}.`,
+    ].join('\n')
+    const nl = await nlBrainOrFallback(text, system, CLARIFICATION_TEXT)
     if (nl.response) {
       try {
         await client.sendMessage(chatId, nl.response)
@@ -480,7 +505,7 @@ export async function handleUpdate(
         pollerState.last_error = `sendMessage: ${(e as Error).message}`
       }
     }
-    console.log(`dutch-poller: cerebro NL (${nl.brain}) para: ${text.slice(0, 80)}`)
+    console.log(`dutch-poller: cerebro NL (${nl.brain}, ${language}) para: ${text.slice(0, 80)}`)
   } else {
     let response: string
     try {

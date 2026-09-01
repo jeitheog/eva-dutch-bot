@@ -20,11 +20,14 @@ export type Intent =
   | { type: 'pending' }
   | { type: 'start' }
   | { type: 'help' }
+  /** Cambiar el idioma activo del estudio: 'nl' (holandés) | 'en' (inglés). */
+  | { type: 'language'; language: 'nl' | 'en' }
   /** Sin intent determinista: lo resuelve el cerebro de lenguaje natural. */
   | { type: 'chat' }
 
 export const HELP_TEXT = [
-  '🎓 Lingua — tu profesor de holandés. Comandos:',
+  '🎓 Lingua — tu profesor de idiomas (holandés 🇳🇱 e inglés 🇬🇧). Comandos:',
+  '• "inglés" / "holandés" — cambiar de idioma',
   '• "¿cómo se dice <frase>?" — traduce y te la añade a tus tarjetas',
   '• "aprender esta frase: <frase>" — igual, para frases largas',
   '• "repaso" / "dame 10 frases" — sesión de repaso con botones',
@@ -44,11 +47,19 @@ export const CONTINUE_RE = /^(sigue|siguiente frase|siguiente tarjeta|siguiente|
 export const STOP_RE = /^(para|basta|stop|termina|terminar)\b/i
 
 export const INTRO_TEXT = [
-  '🎓 ¡Hola! Soy Lingua, tu profesor de holandés.',
+  '🎓 ¡Hola! Soy Lingua, tu profesor de idiomas: holandés 🇳🇱 e inglés 🇬🇧.',
   'Puedo traducirte frases, guardarlas en tus tarjetas y hacer repaso contigo cada día.',
+  'Di "inglés" o "holandés" para elegir idioma.',
   '¿Por dónde quieres empezar?',
   'Y si algún día quieres ver todo lo que sé hacer, solo dime "ayuda".',
 ].join('\n')
+
+/** Confirmación al cambiar el idioma activo del estudio. */
+export function formatLanguageSwitch(language: 'nl' | 'en'): string {
+  return language === 'en'
+    ? "🇬🇧 ¡A estudiar inglés! Di '¿cómo se dice…?' o 'repaso'"
+    : "🇳🇱 ¡A estudiar holandés! Di '¿cómo se dice…?' o 'repaso'"
+}
 
 /**
  * Respuesta por defecto cuando el mensaje es ambiguo o Lingua no entiende:
@@ -89,15 +100,60 @@ export const PHRASE_POOL: string[] = [
   'het spijt me',
 ]
 
+/**
+ * Pool de frases básicas en INGLÉS: cuando la BD de inglés se queda sin
+ * tarjetas durante un repaso, el bot genera una tarjeta nueva con estas
+ * frases (vía translate con add_card y language='en').
+ */
+export const EN_PHRASE_POOL: string[] = [
+  'good morning',
+  'thank you very much',
+  'you are welcome',
+  'see you tomorrow',
+  'how are you doing',
+  'I do not understand',
+  'where is the train station',
+  'how much does this cost',
+  'I would like a coffee, please',
+  'a beer, please',
+  'the check, please',
+  'I love you',
+  'what is this',
+  'I am learning English',
+  'do you speak Spanish',
+  'I have a question',
+  'can you help me, please',
+  'I am sorry',
+  'have a nice day',
+  'nice to meet you',
+]
+
 /** Extrae el texto a traducir tras el prefijo de intent (permite ¿ inicial). */
 const TRANSLATE_RE =
   /^¿?\s*(?:aprender\s+(?:esta frase|a decir|la frase)\s*:?\s*|aprender\s*:?\s*|guarda\s+(?:esta\s+)?(?:palabra|frase)\s*:?\s*|guarda\s*:?\s*|quiero aprender a decir\s*:?\s*|c[oó]mo se dice\s*:?\s*|dime c[oó]mo se dice\s*:?\s*)(.+)$/i
+
+/**
+ * Cambio de idioma activo: "inglés" / "estudiar inglés" / "cambiar a inglés"
+ * → 'en'; "holandés" / "cambiar a holandés" → 'nl'. Se comprueba ANTES que
+ * translate para que "aprender inglés" cambie de idioma y no traduzca la
+ * palabra. Frases como "¿cómo se dice inglés?" no casan (empiezan por
+ * "cómo se dice") y siguen traduciendo la palabra.
+ */
+const LANGUAGE_INTENT_RE =
+  /^(?:quiero\s+)?(?:estudiar|cambiar(?:\s+a)?|aprender|practicar|vamos\s+a\s+(?:estudiar|practicar)|a\s+(?:estudiar|practicar))?\s*(ingl[eé]s|english|holand[eé]s|neerland[eé]s|nederlands)\b/i
 
 export function parseIntent(raw: string): Intent {
   const text = (raw ?? '').trim()
   // Vacío o sin intent determinista → chat (cerebro NL). El menú de comandos
   // SOLO sale si el usuario pide explícitamente "ayuda"/"comandos".
   if (!text) return { type: 'chat' }
+
+  const langMatch = text.match(LANGUAGE_INTENT_RE)
+  if (langMatch) {
+    const word = langMatch[1].toLowerCase()
+    const language: 'nl' | 'en' = /^ingl[eé]s|^english/.test(word) ? 'en' : 'nl'
+    return { type: 'language', language }
+  }
 
   const translateMatch = text.match(TRANSLATE_RE)
   if (translateMatch) return { type: 'translate', text: translateMatch[1].trim().replace(/[¿?]+$/, '') }
@@ -129,10 +185,12 @@ export function parseIntent(raw: string): Intent {
 export function formatCardCreated(t: TranslateResponse): string {
   const card = t.card
   if (t.duplicate) return 'Ya la tienes 😊'
+  // El front es el texto en el idioma objetivo (en o nl); back siempre es el español.
+  const front = card?.front ?? t.en ?? t.nl
   const lines = [
     '✅ Perfecto. Te la añado a tus tarjetas:',
-    `📌 ${card?.nl ?? t.nl}`,
-    `💬 ${card?.es ?? t.es}`,
+    `📌 ${front}`,
+    `💬 ${card?.back ?? t.es}`,
   ]
   if (t.pronunciation) lines.push(`🗣 ${t.pronunciation}`)
   if (t.explanation) lines.push(`📖 ${t.explanation}`)
@@ -282,6 +340,8 @@ export interface IntentDeps {
   /** Audio ogg de pronunciación de la tarjeta (para la nota de voz del front). */
   getAudio(cardId: number): Promise<Uint8Array>
   sendMessage(chatId: number | string, text: string, replyMarkup?: { inline_keyboard: InlineKeyboardButton[][] }): Promise<unknown>
+  /** Cambia el idioma activo del usuario (persistido en data/dutch/user_language.json). */
+  setLanguage(chatId: number | string, language: 'nl' | 'en'): void
   /**
    * Cerebro redactor (opcional): cuando el intent devuelve DATOS (traducción,
    * estadísticas, pendientes), el bot construye el contexto real y el LLM
@@ -330,7 +390,9 @@ export async function redactOrFallback(brain: Brain | undefined, req: RedactRequ
 
 /** Contexto de una traducción/tarjeta (los datos reales de la respuesta). */
 export function buildTranslateContext(t: TranslateResponse): string {
-  const lines = [`nl: ${t.nl}`, `es: ${t.es}`]
+  const lang = t.language ?? (t.en ? 'en' : 'nl')
+  const front = t.en || t.nl
+  const lines = [`${lang}: ${front}`, `es: ${t.es}`]
   if (t.pronunciation) lines.push(`pronunciacion: ${t.pronunciation}`)
   if (t.explanation) lines.push(`explicacion: ${t.explanation}`)
   if (t.examples && t.examples.length > 0) lines.push(`ejemplos: ${t.examples.slice(0, 3).join(' | ')}`)
@@ -412,6 +474,11 @@ export async function handleSimpleIntent(
       return INTRO_TEXT
     case 'help':
       return HELP_TEXT
+    case 'language': {
+      // Cambia el idioma activo (persistido) y confirma con el mensaje.
+      deps.setLanguage(chatId, intent.language)
+      return formatLanguageSwitch(intent.language)
+    }
     case 'review':
       // El flujo de repaso lo orquesta el poller (sesión multi-mensaje).
       return ''
